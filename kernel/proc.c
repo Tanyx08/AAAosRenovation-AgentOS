@@ -124,6 +124,7 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  agent_init_proc(p);
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -168,6 +169,7 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  agent_init_proc(p);
   p->state = UNUSED;
 }
 
@@ -296,6 +298,7 @@ fork(void)
   }
 
   np->sz = p->sz;
+  agent_after_fork(np, p);
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);

@@ -22,3 +22,11 @@
 #define SYS_close  21
 #define SYS_mmap   22
 #define SYS_munmap 23
+#define SYS_agent_create 24
+#define SYS_agent_info 25
+#define SYS_tool_call 26
+#define SYS_tool_list 27
+#define SYS_context_push 28
+#define SYS_context_query 29
+#define SYS_context_rollback 30
+#define SYS_context_clear 31

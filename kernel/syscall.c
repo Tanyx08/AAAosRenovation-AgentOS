@@ -103,6 +103,14 @@ extern uint64 sys_mkdir(void);
 extern uint64 sys_close(void);
 extern uint64 sys_mmap(void);
 extern uint64 sys_munmap(void);
+extern uint64 sys_agent_create(void);
+extern uint64 sys_agent_info(void);
+extern uint64 sys_tool_call(void);
+extern uint64 sys_tool_list(void);
+extern uint64 sys_context_push(void);
+extern uint64 sys_context_query(void);
+extern uint64 sys_context_rollback(void);
+extern uint64 sys_context_clear(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -130,6 +138,14 @@ static uint64 (*syscalls[])(void) = {
 [SYS_close]   sys_close,
 [SYS_mmap]    sys_mmap,
 [SYS_munmap]  sys_munmap,
+[SYS_agent_create] sys_agent_create,
+[SYS_agent_info] sys_agent_info,
+[SYS_tool_call] sys_tool_call,
+[SYS_tool_list] sys_tool_list,
+[SYS_context_push] sys_context_push,
+[SYS_context_query] sys_context_query,
+[SYS_context_rollback] sys_context_rollback,
+[SYS_context_clear] sys_context_clear,
 };
 
 void

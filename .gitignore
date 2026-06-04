@@ -106,9 +106,14 @@ dkms.conf
 # Unknown but auto-generated files
 _*
 *.sym
+*.asm
 initcode
+fs.img
 xv6.out.*
 .gdbinit
+kernel/kernel
+mkfs/mkfs
+user/usys.S
 
 # Python cache
 __pycache__/

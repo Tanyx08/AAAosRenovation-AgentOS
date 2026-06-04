@@ -1,4 +1,6 @@
 // Saved registers for kernel context switches.
+#include "agent.h"
+
 struct context {
   uint64 ra;
   uint64 sp;
@@ -121,4 +123,17 @@ struct proc {
   char name[16];               // Process name (debugging)
 
   struct vma *vma; // virtual memory area
+
+  int agent_type;
+  int heartbeat_interval;
+  uint64 resource_quota;
+  int loop_state;
+  uint64 context_region_start;
+  uint64 context_region_size;
+  uint64 context_path_len;
+  uint64 context_node_count;
+  uint64 context_dropped_nodes;
+  uint16 context_offsets[AGENT_CONTEXT_MAX_NODES];
+  uint16 context_lengths[AGENT_CONTEXT_MAX_NODES];
+  char agent_message[AGENT_MESSAGE_MAX];
 };

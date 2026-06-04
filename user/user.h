@@ -37,6 +37,14 @@ int ugetpid(void);
 // mmap lab
 char* mmap(char *addr, int length, int prot, int flags, int fd, int offset);
 int munmap(char *addr, int length);
+uint64 agent_create(int, int, uint64);
+int agent_info(void*);
+int tool_call(void*, void*);
+int tool_list(void*, uint64);
+int context_push(void*);
+int context_query(void*, uint64);
+int context_rollback(uint64);
+int context_clear(void);
 
 // ulib.c
 int stat(const char*, struct stat*);

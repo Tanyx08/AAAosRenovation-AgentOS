@@ -20,6 +20,8 @@ OBJS = \
   $K/trap.o \
   $K/syscall.o \
   $K/sysproc.o \
+  $K/agent.o \
+  $K/sysagent.o \
   $K/bio.o \
   $K/fs.o \
   $K/log.o \
@@ -189,6 +191,7 @@ UPROGS=\
 	$U/_wc\
 	$U/_zombie\
 	$U/_mmaptest\
+	$U/_agenttest\
 
 
 
