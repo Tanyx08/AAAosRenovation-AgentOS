@@ -45,6 +45,11 @@ int context_push(void*);
 int context_query(void*, uint64);
 int context_rollback(uint64);
 int context_clear(void);
+int agent_heartbeat_set(int);
+int agent_heartbeat_stop(void);
+int agent_watch(int);
+int agent_wait(int, void*);
+int agent_unwatch(int);
 
 // ulib.c
 int stat(const char*, struct stat*);

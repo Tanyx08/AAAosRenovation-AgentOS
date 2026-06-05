@@ -95,9 +95,9 @@ sys_context_query(void)
 uint64
 sys_context_rollback(void)
 {
-  uint64 keep_nodes;
+  int keep_nodes;
 
-  argaddr(0, &keep_nodes);
+  argint(0, &keep_nodes);
   return agent_context_rollback(myproc(), keep_nodes);
 }
 
@@ -106,4 +106,48 @@ sys_context_clear(void)
 {
   agent_context_clear(myproc());
   return 0;
+}
+
+uint64
+sys_agent_heartbeat_set(void)
+{
+  int interval;
+
+  argint(0, &interval);
+  return agent_proc_heartbeat_set(myproc(), interval);
+}
+
+uint64
+sys_agent_heartbeat_stop(void)
+{
+  return agent_proc_heartbeat_stop(myproc());
+}
+
+uint64
+sys_agent_watch(void)
+{
+  int mask;
+
+  argint(0, &mask);
+  return agent_proc_watch(myproc(), mask);
+}
+
+uint64
+sys_agent_wait(void)
+{
+  int continue_loop;
+  uint64 uevent;
+
+  argint(0, &continue_loop);
+  argaddr(1, &uevent);
+  return agent_proc_wait(myproc(), continue_loop, uevent);
+}
+
+uint64
+sys_agent_unwatch(void)
+{
+  int mask;
+
+  argint(0, &mask);
+  return agent_proc_unwatch(myproc(), mask);
 }

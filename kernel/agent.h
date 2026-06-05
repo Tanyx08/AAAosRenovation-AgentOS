@@ -16,6 +16,13 @@
 #define AGENT_LOOP_RUNNING (2)
 #define AGENT_LOOP_WAITING (3)
 #define AGENT_LOOP_ROLLED_BACK (4)
+#define AGENT_LOOP_DONE (5)
+
+#define AGENT_EVENT_NONE (0)
+#define AGENT_EVENT_HEARTBEAT (1)
+#define AGENT_EVENT_MESSAGE (2)
+
+#define AGENT_WATCH_MESSAGE AGENT_EVENT_MESSAGE
 
 #define AGENT_TOOL_NAME_MAX (32)
 #define AGENT_TOOL_PARAM_MAX (128)
@@ -76,6 +83,13 @@ struct agent_context_header {
   char last_result[AGENT_TOOL_RESULT_MAX];
 };
 
+struct agent_wait_event {
+  int reason;
+  uint32 reserved;
+  uint64 tick;
+  char message[AGENT_MESSAGE_MAX];
+};
+
 void agent_init_proc(struct proc *p);
 void agent_after_fork(struct proc *dst, struct proc *src);
 void agent_context_clear(struct proc *p);
@@ -88,5 +102,11 @@ int agent_context_rollback(struct proc *p, uint64 keep_nodes);
 int agent_copy_tool_list(struct proc *p, uint64 dst, uint64 len);
 int agent_tool_call(struct proc *p, struct agent_tool_request *req,
                     struct agent_tool_response *resp);
+int agent_proc_heartbeat_set(struct proc *p, int interval);
+int agent_proc_heartbeat_stop(struct proc *p);
+int agent_proc_watch(struct proc *p, int mask);
+int agent_proc_unwatch(struct proc *p, int mask);
+int agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent);
+void agent_tick(uint64 now);
 
 #endif

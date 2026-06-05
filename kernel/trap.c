@@ -171,10 +171,14 @@ kerneltrap()
 void
 clockintr()
 {
+  uint now;
+
   acquire(&tickslock);
   ticks++;
+  now = ticks;
   wakeup(&ticks);
   release(&tickslock);
+  agent_tick(now);
 }
 
 // check if it's an external interrupt or software interrupt,
@@ -226,4 +230,3 @@ devintr()
     return 0;
   }
 }
-

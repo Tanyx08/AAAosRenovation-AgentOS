@@ -30,3 +30,8 @@
 #define SYS_context_query 29
 #define SYS_context_rollback 30
 #define SYS_context_clear 31
+#define SYS_agent_heartbeat_set 32
+#define SYS_agent_heartbeat_stop 33
+#define SYS_agent_watch 34
+#define SYS_agent_wait 35
+#define SYS_agent_unwatch 36

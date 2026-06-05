@@ -2,7 +2,7 @@
 
 本文档面向项目开发者，目标是帮助你快速理解当前 xv6 Agent-OS 扩展“改了哪里、为什么这样改、每条功能链路怎么跑通”。如果只是想知道怎么使用接口和做演示，请看 `AGENT_OS_INTERFACE_LLM_GUIDE.md`。
 
-当前实现基于 `xv6-2023-mit-labs` 的 `mmap` 分支，新增 Agent 进程、Agent Context 区、结构化工具调用、Context Path 管理，以及面向 Agent 查询模式的 AgentFS 扩展层。
+当前实现基于 `xv6-2023-mit-labs` 的 `mmap` 分支，新增 Agent 进程、Agent Context 区、结构化工具调用、Context Path 管理、Agent Loop 内核运行支持，以及面向 Agent 查询模式的 AgentFS 扩展层。
 
 ## 1. 文件总览
 
@@ -10,7 +10,7 @@
 
 ```text
 kernel/agent.h       Agent-OS 常量、ABI 结构体、内核函数声明
-kernel/agent.c       Agent 核心实现：Context、Tool Call、AgentFS
+kernel/agent.c       Agent 核心实现：Context、Tool Call、AgentFS、Agent Loop
 kernel/sysagent.c    Agent-OS 系统调用入口
 kernel/proc.h        PCB 扩展字段
 kernel/proc.c        进程生命周期中初始化、清理、fork 继承 Agent 字段
@@ -20,7 +20,8 @@ user/user.h          用户态 syscall 声明
 user/usys.pl         用户态 syscall stub 生成
 user/user.ld         修复用户 ELF 段权限，保证 usertests 通过
 user/agenttest.c     Agent-OS 自动测试程序
-Makefile             编译 agent.o、sysagent.o、agenttest
+user/agentlooptest.c Agent Loop 自动测试程序
+Makefile             编译 agent.o、sysagent.o、agenttest、agentlooptest
 ```
 
 整体调用路径：
@@ -51,6 +52,19 @@ Agent-OS 的公共 ABI 定义在 `kernel/agent.h`。用户态测试程序也直�
 #define AGENT_TYPE_PRIMARY (1)
 #define AGENT_TYPE_WORKER  (2)
 
+#define AGENT_LOOP_IDLE       (0)
+#define AGENT_LOOP_READY      (1)
+#define AGENT_LOOP_RUNNING    (2)
+#define AGENT_LOOP_WAITING    (3)
+#define AGENT_LOOP_ROLLED_BACK (4)
+#define AGENT_LOOP_DONE       (5)
+
+#define AGENT_EVENT_NONE      (0)
+#define AGENT_EVENT_HEARTBEAT (1)
+#define AGENT_EVENT_MESSAGE   (2)
+
+#define AGENT_WATCH_MESSAGE AGENT_EVENT_MESSAGE
+
 #define AGENT_TOOL_OK                 (0)
 #define AGENT_TOOL_ERR_TOOL_NOT_FOUND (-1)
 #define AGENT_TOOL_ERR_BAD_PARAM      (-2)
@@ -70,6 +84,13 @@ struct agent_tool_response {
   int status;
   uint32 result_len;
   char result[AGENT_TOOL_RESULT_MAX];
+};
+
+struct agent_wait_event {
+  int reason;
+  uint32 reserved;
+  uint64 tick;
+  char message[AGENT_MESSAGE_MAX];
 };
 ```
 
@@ -103,8 +124,13 @@ uint64 context_region_size;
 uint64 context_path_len;
 uint64 context_node_count;
 uint64 context_dropped_nodes;
+uint64 heartbeat_deadline;
+uint64 wakeup_tick;
 uint16 context_offsets[AGENT_CONTEXT_MAX_NODES];
 uint16 context_lengths[AGENT_CONTEXT_MAX_NODES];
+int watch_mask;
+int pending_events;
+int last_wakeup_reason;
 char agent_message[AGENT_MESSAGE_MAX];
 ```
 
@@ -120,8 +146,13 @@ context_region_size     Agent Context 区大小
 context_path_len        当前 Context Path 已使用字节数
 context_node_count      当前上下文节点数量
 context_dropped_nodes   FIFO 淘汰过的节点数量
+heartbeat_deadline      下一次心跳唤醒 tick
+wakeup_tick             最近一次唤醒 tick
 context_offsets         每个节点在 Context 区中的偏移
 context_lengths         每个节点长度
+watch_mask              当前关注的事件位图
+pending_events          尚未消费的待处理事件
+last_wakeup_reason      最近一次唤醒原因
 agent_message           send_message 使用的简单消息槽
 ```
 
@@ -376,6 +407,29 @@ agent_context_rollback(struct proc *p, uint64 keep_nodes)
 
 ## 7. 系统调用封装
 
+当前 Agent-OS syscall 可以按功能分成三组：
+
+```text
+Agent 创建与信息查询:
+  agent_create
+  agent_info
+
+结构化工具调用与上下文管理:
+  tool_call
+  tool_list
+  context_push
+  context_query
+  context_rollback
+  context_clear
+
+Agent Loop 运行支持:
+  agent_heartbeat_set
+  agent_heartbeat_stop
+  agent_watch
+  agent_wait
+  agent_unwatch
+```
+
 `kernel/sysagent.c` 负责处理用户态地址和内核结构体之间的复制。以 `tool_call` 为例：
 
 ```c
@@ -412,6 +466,25 @@ copyin/copyout:
 
 返回值:
   syscall 返回 resp.status，完整结构化结果写入 resp
+```
+
+任务五新增 syscall 的职责是：
+
+```text
+agent_heartbeat_set(interval):
+  设置当前 Agent 的心跳周期
+
+agent_heartbeat_stop():
+  停止心跳触发
+
+agent_watch(mask):
+  注册关注的事件类型。当前实现支持消息事件
+
+agent_wait(continue_loop, &event):
+  当前轮结束后挂起等待，直到心跳或事件到来
+
+agent_unwatch(mask):
+  取消事件关注
 ```
 
 ## 8. Tool Call 分发器
@@ -474,6 +547,8 @@ get_file_attr
 del_file_attr
 query_file
 ```
+
+在任务五中，`send_message` 还承担了事件触发器的作用：如果目标 Agent 注册了 `AGENT_WATCH_MESSAGE`，内核不仅把消息写进 `agent_message`，还会把该消息标记为待处理事件，并在目标进程睡眠时直接唤醒它。
 
 ## 9. 参数解析与结果构造
 
@@ -633,7 +708,179 @@ full_scanned    当前元数据表中文件数量
 
 这些字段用于展示“按属性查询优于全量遍历”的效果。
 
-## 11. user.ld 修复
+## 11. Agent Loop 内核运行机制
+
+任务五的重点不是只在 PCB 里增加几个字段，而是让 Agent 真正具备：
+
+```text
+1. 可以按心跳进入下一轮
+2. 可以在无事可做时阻塞休眠
+3. 可以被内核事件主动唤醒
+4. 可以向内核声明“继续”或“结束”
+```
+
+### 11.1 心跳机制
+
+心跳由 `heartbeat_interval + heartbeat_deadline` 两个字段配合实现。设置接口：
+
+```c
+int
+agent_proc_heartbeat_set(struct proc *p, int interval)
+{
+  ...
+  p->heartbeat_interval = interval;
+  p->heartbeat_deadline = agent_now_safe() + interval;
+  ...
+}
+```
+
+真正的触发点在时钟中断。`clockintr()` 在 `ticks++` 之后调用：
+
+```c
+agent_tick(now);
+```
+
+`agent_tick()` 会扫描进程表，找出到期的 Agent：
+
+```c
+if(p->heartbeat_interval > 0 &&
+   p->heartbeat_deadline > 0 &&
+   now >= p->heartbeat_deadline){
+  p->pending_events |= AGENT_EVENT_HEARTBEAT;
+  p->last_wakeup_reason = AGENT_EVENT_HEARTBEAT;
+  p->wakeup_tick = now;
+  p->heartbeat_deadline = now + p->heartbeat_interval;
+  if(p->state == SLEEPING && p->chan == p)
+    p->state = RUNNABLE;
+}
+```
+
+这条链路实现了“心跳到达时由内核主动唤醒”，而不是用户态轮询 `uptime()`。
+
+### 11.2 事件驱动触发
+
+当前版本实现的事件源是“消息事件”。
+
+用户态通过：
+
+```c
+agent_watch(AGENT_WATCH_MESSAGE);
+```
+
+注册关注，关注位保存在 `watch_mask` 中。
+
+已有工具 `send_message` 被扩展为任务五的事件入口：
+
+```c
+if(target->watch_mask & AGENT_WATCH_MESSAGE){
+  target->pending_events |= AGENT_EVENT_MESSAGE;
+  target->last_wakeup_reason = AGENT_EVENT_MESSAGE;
+  target->wakeup_tick = agent_now_safe();
+  if(target->state == SLEEPING && target->chan == target)
+    target->state = RUNNABLE;
+}
+```
+
+这样，消息不仅能被写入目标 Agent 的 `agent_message`，还能直接触发等待中的 Agent 继续下一轮 Loop。
+
+### 11.3 `agent_wait()` 与休眠/唤醒
+
+`agent_wait()` 是任务五的核心 syscall。它承载了两层语义：
+
+```text
+continue_loop = 1:
+  当前轮结束，但还要继续下一轮，进入等待状态
+
+continue_loop = 0:
+  当前任务完成，退出 Loop
+```
+
+等待逻辑：
+
+```c
+acquire(&p->lock);
+p->loop_state = AGENT_LOOP_WAITING;
+for(;;){
+  reason = p->pending_events;
+  if(reason != AGENT_EVENT_NONE){
+    ...
+    p->pending_events = 0;
+    p->loop_state = AGENT_LOOP_READY;
+    release(&p->lock);
+    copyout(..., &event, sizeof(event));
+    return reason;
+  }
+  ...
+  p->chan = p;
+  p->state = SLEEPING;
+  sched();
+  p->chan = 0;
+}
+```
+
+这里没有直接调用 xv6 的通用 `sleep()`，而是使用同样的状态机思路手工切换到 `SLEEPING + sched()`。原因是此时已经持有 `p->lock`，如果再走通用 `sleep()` 会重复获取 `p->lock`。
+
+唤醒后，内核把结构化事件拷回用户态：
+
+```c
+struct agent_wait_event {
+  int reason;
+  uint64 tick;
+  char message[AGENT_MESSAGE_MAX];
+};
+```
+
+因此用户态可以区分是：
+
+```text
+AGENT_EVENT_HEARTBEAT
+AGENT_EVENT_MESSAGE
+或两者的组合
+```
+
+### 11.4 生命周期管理
+
+任务五要求 Agent 在每轮结束时声明“继续”或“完成”。当前版本直接把这层协议折叠进 `agent_wait()`：
+
+```c
+if(continue_loop == 0){
+  p->loop_state = AGENT_LOOP_DONE;
+  p->heartbeat_interval = 0;
+  p->heartbeat_deadline = 0;
+  p->watch_mask = 0;
+  p->pending_events = 0;
+  p->last_wakeup_reason = AGENT_EVENT_NONE;
+  p->agent_message[0] = 0;
+  return 0;
+}
+```
+
+这样用户态写 Loop 时比较自然：
+
+```c
+for(;;){
+  // think -> act -> observe
+  if(done)
+    agent_wait(0, 0);
+  else
+    agent_wait(1, &event);
+}
+```
+
+### 11.5 多 Agent 协调
+
+当前没有单独实现优先级调度器，仍沿用 xv6 原始调度器；但任务五要求的“多个 Agent 同时运行，系统保持稳定”已经由下面这些机制支撑：
+
+```text
+每个 Agent 有自己的 heartbeat_deadline
+每个 Agent 有自己的 watch_mask / pending_events
+心跳和消息都只唤醒目标 Agent
+等待中的 Agent 不会忙等占 CPU
+```
+
+因此多个 Agent 可以独立进入 `WAITING -> RUNNABLE -> RUNNING` 的循环，而不互相串扰。
+
+## 12. user.ld 修复
 
 本项目修改了 `user/user.ld`，将用户 ELF 拆分为两个 LOAD 段：
 
@@ -686,9 +933,9 @@ read(fd, (void*)0, 8192);
 
 正确行为是内核拒绝向代码页写入。修复后，`exec()` 会根据 ELF flags 为代码页去掉 `PTE_W`，从而通过该测试。
 
-## 12. 测试设计
+## 13. 测试设计
 
-### 12.1 agenttest
+### 13.1 agenttest
 
 `user/agenttest.c` 是 Agent-OS 功能测试程序，覆盖主线功能。
 
@@ -735,7 +982,7 @@ call_tool(const char *tool, const char *params, struct agent_tool_response *resp
 agenttest: all tests passed
 ```
 
-### 12.2 usertests
+### 13.2 usertests
 
 `usertests` 是 xv6 原生回归测试。它验证新增 Agent-OS 模块没有破坏基础内核行为。
 
@@ -745,7 +992,7 @@ agenttest: all tests passed
 ALL TESTS PASSED
 ```
 
-### 12.3 mmaptest
+### 13.3 mmaptest
 
 因为项目基于 `mmap` 分支，所以还需要验证原始 mmap 实验仍然可用。
 
@@ -755,7 +1002,45 @@ ALL TESTS PASSED
 mmaptest: all tests succeeded
 ```
 
-## 13. 构建与运行
+### 13.4 agentlooptest
+
+`user/agentlooptest.c` 是任务五的专门测试程序。
+
+它覆盖四类场景：
+
+```text
+1. heartbeat_test
+   设置心跳 -> 调用 agent_wait -> 确认被心跳唤醒
+
+2. message_only_test
+   watch(message) -> stop heartbeat -> 子进程 send_message
+   -> 确认只靠消息事件唤醒
+
+3. worker_loop
+   先等一次心跳，再等一次消息，最后 agent_wait(0, 0)
+   -> 验证 Loop 的继续/完成状态切换
+
+4. multi_agent_test
+   两个 worker 同时运行
+   -> 验证多 Agent 并发稳定性
+```
+
+这四部分分别对应任务五的验收标准：
+
+```text
+心跳触发正确进入 Agent Loop
+无事件时真正休眠
+事件驱动唤醒有效
+多个 Agent 可同时运行且系统稳定
+```
+
+成功输出：
+
+```text
+agentlooptest: all tests passed
+```
+
+## 14. 构建与运行
 
 构建：
 
@@ -775,6 +1060,7 @@ make qemu
 
 ```text
 agenttest
+agentlooptest
 usertests
 mmaptest
 ```
@@ -785,7 +1071,7 @@ mmaptest
 Ctrl-A 然后按 X
 ```
 
-## 14. 当前实现的边界
+## 15. 当前实现的边界
 
 当前实现已经覆盖基础任务和 AgentFS 查询扩展，但仍有一些边界：
 
@@ -794,7 +1080,10 @@ AgentFS 属性表是运行时内存表，重启后不持久化
 Context 区由 uvmalloc 追加到用户地址空间末尾，不是独立 VMA
 内容摘要是前 128 字节子串匹配，不是 embedding 语义检索
 query_file 的索引策略比较简单，只按第一个属性条件走哈希桶
+任务五当前只实现了消息事件，还没有扩展到文件修改等更多事件源
+send_message 仍是单消息槽，不是完整消息队列
+多 Agent 运行仍沿用 xv6 原始调度器，没有单独的 Agent 优先级策略
 真实 LLM 演示还需要单独的 agent_loop 用户态程序或宿主机桥接脚本
 ```
 
-这些限制不影响当前实验要求的主线验收。后续可以继续扩展 `.agentmeta` 持久化、专用 VMA、目录递归扫描、多条件索引选择和真实 LLM 串口桥接。
+这些限制不影响当前实验要求的主线验收。后续可以继续扩展 `.agentmeta` 持久化、专用 VMA、目录递归扫描、多条件索引选择、多事件源、消息队列和真实 LLM 串口桥接。

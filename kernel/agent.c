@@ -349,6 +349,17 @@ agent_now(void)
 }
 
 static uint64
+agent_now_safe(void)
+{
+  uint64 now;
+
+  acquire(&tickslock);
+  now = ticks;
+  release(&tickslock);
+  return now;
+}
+
+static uint64
 agent_path_capacity(struct proc *p)
 {
   uint64 cap = p->context_region_size - sizeof(struct agent_context_header);
@@ -422,8 +433,13 @@ agent_init_proc(struct proc *p)
   p->context_path_len = 0;
   p->context_node_count = 0;
   p->context_dropped_nodes = 0;
+  p->heartbeat_deadline = 0;
+  p->wakeup_tick = 0;
   memset(p->context_offsets, 0, sizeof(p->context_offsets));
   memset(p->context_lengths, 0, sizeof(p->context_lengths));
+  p->watch_mask = 0;
+  p->pending_events = 0;
+  p->last_wakeup_reason = AGENT_EVENT_NONE;
   memset(p->agent_message, 0, sizeof(p->agent_message));
 }
 
@@ -439,10 +455,15 @@ agent_after_fork(struct proc *dst, struct proc *src)
   dst->context_path_len = src->context_path_len;
   dst->context_node_count = src->context_node_count;
   dst->context_dropped_nodes = src->context_dropped_nodes;
+  dst->heartbeat_deadline = src->heartbeat_deadline;
+  dst->wakeup_tick = src->wakeup_tick;
   memmove(dst->context_offsets, src->context_offsets,
           sizeof(dst->context_offsets));
   memmove(dst->context_lengths, src->context_lengths,
           sizeof(dst->context_lengths));
+  dst->watch_mask = src->watch_mask;
+  dst->pending_events = src->pending_events;
+  dst->last_wakeup_reason = src->last_wakeup_reason;
   memmove(dst->agent_message, src->agent_message, sizeof(dst->agent_message));
 }
 
@@ -517,6 +538,13 @@ agent_mark_current(int type, int heartbeat_interval, uint64 resource_quota)
   p->heartbeat_interval = heartbeat_interval;
   p->resource_quota = resource_quota;
   p->loop_state = AGENT_LOOP_READY;
+  p->heartbeat_deadline = heartbeat_interval > 0 ?
+                          agent_now_safe() + heartbeat_interval : 0;
+  p->wakeup_tick = 0;
+  p->watch_mask = 0;
+  p->pending_events = 0;
+  p->last_wakeup_reason = AGENT_EVENT_NONE;
+  p->agent_message[0] = 0;
   agent_context_clear(p);
   return p->context_region_start;
 }
@@ -716,7 +744,16 @@ tool_send_message(struct agent_tool_request *req,
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "target not found");
     return;
   }
+  acquire(&target->lock);
   safestrcpy(target->agent_message, message, sizeof(target->agent_message));
+  if(target->watch_mask & AGENT_WATCH_MESSAGE){
+    target->pending_events |= AGENT_EVENT_MESSAGE;
+    target->last_wakeup_reason = AGENT_EVENT_MESSAGE;
+    target->wakeup_tick = agent_now_safe();
+    if(target->state == SLEEPING && target->chan == target)
+      target->state = RUNNABLE;
+  }
+  release(&target->lock);
   tool_resp_set(resp, AGENT_TOOL_OK, "message delivered");
 }
 
@@ -984,4 +1021,148 @@ agent_tool_call(struct proc *p, struct agent_tool_request *req,
   agent_context_push_node(p, &node);
   p->loop_state = AGENT_LOOP_READY;
   return resp->status;
+}
+
+int
+agent_proc_heartbeat_set(struct proc *p, int interval)
+{
+  if(p->agent_type == AGENT_TYPE_NORMAL)
+    return AGENT_TOOL_ERR_NOT_AGENT;
+  if(interval <= 0)
+    return -1;
+
+  acquire(&p->lock);
+  p->heartbeat_interval = interval;
+  p->heartbeat_deadline = agent_now_safe() + interval;
+  if(p->loop_state != AGENT_LOOP_DONE)
+    p->loop_state = AGENT_LOOP_READY;
+  release(&p->lock);
+  return 0;
+}
+
+int
+agent_proc_heartbeat_stop(struct proc *p)
+{
+  if(p->agent_type == AGENT_TYPE_NORMAL)
+    return AGENT_TOOL_ERR_NOT_AGENT;
+
+  acquire(&p->lock);
+  p->heartbeat_interval = 0;
+  p->heartbeat_deadline = 0;
+  p->pending_events &= ~AGENT_EVENT_HEARTBEAT;
+  if(p->last_wakeup_reason == AGENT_EVENT_HEARTBEAT)
+    p->last_wakeup_reason = AGENT_EVENT_NONE;
+  release(&p->lock);
+  return 0;
+}
+
+int
+agent_proc_watch(struct proc *p, int mask)
+{
+  if(p->agent_type == AGENT_TYPE_NORMAL)
+    return AGENT_TOOL_ERR_NOT_AGENT;
+  if(mask & ~AGENT_WATCH_MESSAGE)
+    return -1;
+
+  acquire(&p->lock);
+  p->watch_mask |= mask;
+  if(p->loop_state != AGENT_LOOP_DONE)
+    p->loop_state = AGENT_LOOP_READY;
+  release(&p->lock);
+  return 0;
+}
+
+int
+agent_proc_unwatch(struct proc *p, int mask)
+{
+  if(p->agent_type == AGENT_TYPE_NORMAL)
+    return AGENT_TOOL_ERR_NOT_AGENT;
+
+  acquire(&p->lock);
+  if(mask == 0)
+    p->watch_mask = 0;
+  else
+    p->watch_mask &= ~mask;
+  if(!(p->watch_mask & AGENT_WATCH_MESSAGE))
+    p->pending_events &= ~AGENT_EVENT_MESSAGE;
+  release(&p->lock);
+  return 0;
+}
+
+int
+agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent)
+{
+  struct agent_wait_event event;
+  int reason;
+
+  if(p->agent_type == AGENT_TYPE_NORMAL)
+    return AGENT_TOOL_ERR_NOT_AGENT;
+
+  if(continue_loop == 0){
+    acquire(&p->lock);
+    p->loop_state = AGENT_LOOP_DONE;
+    p->heartbeat_interval = 0;
+    p->heartbeat_deadline = 0;
+    p->watch_mask = 0;
+    p->pending_events = 0;
+    p->last_wakeup_reason = AGENT_EVENT_NONE;
+    p->agent_message[0] = 0;
+    release(&p->lock);
+    return 0;
+  }
+
+  memset(&event, 0, sizeof(event));
+  acquire(&p->lock);
+  p->loop_state = AGENT_LOOP_WAITING;
+  for(;;){
+    reason = p->pending_events;
+    if(reason != AGENT_EVENT_NONE){
+      event.reason = reason;
+      event.tick = p->wakeup_tick ? p->wakeup_tick : agent_now_safe();
+      if(reason & AGENT_EVENT_MESSAGE)
+        safestrcpy(event.message, p->agent_message, sizeof(event.message));
+      p->pending_events = 0;
+      p->last_wakeup_reason = reason;
+      p->agent_message[0] = 0;
+      p->loop_state = AGENT_LOOP_READY;
+      release(&p->lock);
+      if(uevent != 0 &&
+         copyout(p->pagetable, uevent, (char*)&event, sizeof(event)) < 0)
+        return -1;
+      return reason;
+    }
+    if(p->killed){
+      p->loop_state = AGENT_LOOP_DONE;
+      release(&p->lock);
+      return -1;
+    }
+    p->chan = p;
+    p->state = SLEEPING;
+    sched();
+    p->chan = 0;
+  }
+}
+
+void
+agent_tick(uint64 now)
+{
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state != UNUSED &&
+       p->agent_type != AGENT_TYPE_NORMAL &&
+       p->loop_state != AGENT_LOOP_DONE &&
+       p->heartbeat_interval > 0 &&
+       p->heartbeat_deadline > 0 &&
+       now >= p->heartbeat_deadline){
+      p->pending_events |= AGENT_EVENT_HEARTBEAT;
+      p->last_wakeup_reason = AGENT_EVENT_HEARTBEAT;
+      p->wakeup_tick = now;
+      p->heartbeat_deadline = now + p->heartbeat_interval;
+      if(p->state == SLEEPING && p->chan == p)
+        p->state = RUNNABLE;
+    }
+    release(&p->lock);
+  }
 }

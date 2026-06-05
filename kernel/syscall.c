@@ -111,6 +111,11 @@ extern uint64 sys_context_push(void);
 extern uint64 sys_context_query(void);
 extern uint64 sys_context_rollback(void);
 extern uint64 sys_context_clear(void);
+extern uint64 sys_agent_heartbeat_set(void);
+extern uint64 sys_agent_heartbeat_stop(void);
+extern uint64 sys_agent_watch(void);
+extern uint64 sys_agent_wait(void);
+extern uint64 sys_agent_unwatch(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -146,6 +151,11 @@ static uint64 (*syscalls[])(void) = {
 [SYS_context_query] sys_context_query,
 [SYS_context_rollback] sys_context_rollback,
 [SYS_context_clear] sys_context_clear,
+[SYS_agent_heartbeat_set] sys_agent_heartbeat_set,
+[SYS_agent_heartbeat_stop] sys_agent_heartbeat_stop,
+[SYS_agent_watch] sys_agent_watch,
+[SYS_agent_wait] sys_agent_wait,
+[SYS_agent_unwatch] sys_agent_unwatch,
 };
 
 void
