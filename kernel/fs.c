@@ -236,6 +236,9 @@ iupdate(struct inode *ip)
   dip->nlink = ip->nlink;
   dip->size = ip->size;
   memmove(dip->addrs, ip->addrs, sizeof(ip->addrs));
+  dip->attr_count = ip->attr_count;
+  memmove(dip->summary, ip->summary, sizeof(ip->summary));
+  memmove(dip->attrs, ip->attrs, sizeof(ip->attrs));
   log_write(bp);
   brelse(bp);
 }
@@ -309,6 +312,9 @@ ilock(struct inode *ip)
     ip->nlink = dip->nlink;
     ip->size = dip->size;
     memmove(ip->addrs, dip->addrs, sizeof(ip->addrs));
+    ip->attr_count = dip->attr_count;
+    memmove(ip->summary, dip->summary, sizeof(ip->summary));
+    memmove(ip->attrs, dip->attrs, sizeof(ip->attrs));
     brelse(bp);
     ip->valid = 1;
     if(ip->type == 0)
@@ -349,6 +355,9 @@ iput(struct inode *ip)
 
     itrunc(ip);
     ip->type = 0;
+    ip->attr_count = 0;
+    memset(ip->summary, 0, sizeof(ip->summary));
+    memset(ip->attrs, 0, sizeof(ip->attrs));
     iupdate(ip);
     ip->valid = 0;
 

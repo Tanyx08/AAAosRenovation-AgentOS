@@ -594,119 +594,252 @@ param_value(req->params, "value", value, sizeof(value));
 
 ## 10. AgentFS 文件查询扩展
 
-AgentFS 是在 xv6 原生文件系统之上的运行时元数据层，没有修改磁盘 inode 格式。
+任务四当前版本不再把元数据放在单独的运行时 side table 里，而是把它挂在真实 inode 上，再在内存中建立查询索引。
 
-元数据结构：
+### 10.1 真实 inode 元数据
+
+磁盘 inode 结构 `struct dinode` 新增了 AgentFS 元数据字段：
 
 ```c
-struct agent_file_attr {
-  char key[AGENT_FILE_ATTR_KEY_MAX];
-  char value[AGENT_FILE_ATTR_VALUE_MAX];
+struct inode_attr {
+  char key[INODE_ATTR_KEY_MAX];
+  char value[INODE_ATTR_VALUE_MAX];
 };
 
-struct agent_file_meta {
-  int used;
-  uint inum;
-  char path[DIRSIZ + 1];
-  char summary[AGENT_FILE_SUMMARY_MAX];
-  int attr_count;
-  struct agent_file_attr attrs[AGENT_FILE_ATTR_MAX];
-  int index_next;
+struct dinode {
+  ...
+  uint addrs[NDIRECT+1];
+  short attr_count;
+  short meta_reserved;
+  char summary[INODE_SUMMARY_MAX];
+  struct inode_attr attrs[INODE_ATTR_MAX];
+  char meta_padding[28];
 };
 ```
 
-全局表和索引：
-
-```c
-static struct spinlock agent_file_lock;
-static struct agent_file_meta file_meta[AGENT_FILE_META_MAX];
-static int file_index[AGENT_FILE_INDEX_BUCKETS];
-```
-
-当前能力：
+`meta_padding` 的作用是把 `dinode` 补齐到 256 字节，这样 `BSIZE=1024` 时仍然有：
 
 ```text
-文件属性系统:
-  set_file_attr / get_file_attr / del_file_attr
-
-内容摘要:
-  file_summary_refresh() 读取文件前 128 字节
-
-属性索引:
-  hash(key=value) -> linked list
-
-结构化查询:
-  query_file 返回 path、属性、summary、count、index_scanned、full_scanned
+IPB = 1024 / 256 = 4
 ```
 
-设置文件属性时，会校验路径是否存在：
+也就是说，inode 扩展后仍然保持“每个 inode block 放 4 个 inode”，不会破坏 xv6 的基本布局假设。
+
+内存 inode `struct inode` 也同步增加：
 
 ```c
-begin_op();
-struct inode *ip = namei((char*)path);
-if(ip){
-  ilock(ip);
-  if(ip->type == T_FILE)
-    inum = ip->inum;
-  iunlockput(ip);
-}
-end_op();
+short attr_count;
+char summary[INODE_SUMMARY_MAX];
+struct inode_attr attrs[INODE_ATTR_MAX];
 ```
 
-刷新摘要：
+`ilock()` 和 `iupdate()` 负责磁盘与内存之间的同步，所以元数据会跟随 inode 一起持久化，而不是只存在于本次启动周期。
+
+### 10.2 文件属性系统
+
+当前提供的工具仍然是：
+
+```text
+set_file_attr(path,key,value)
+get_file_attr(path,key)
+del_file_attr(path,key)
+query_file(...)
+```
+
+但实现方式已经变化：
+
+1. `set_file_attr`
+   - `namei(path)` 找到真实 inode
+   - `ilock(ip)` 后直接修改 `ip->attrs[]`
+   - 更新 `ip->attr_count`
+   - 重新读取文件前 64 字节到 `ip->summary`
+   - `iupdate(ip)` 持久化
+
+2. `get_file_attr`
+   - 直接从真实 inode 读取属性
+
+3. `del_file_attr`
+   - 直接在真实 inode 中删除属性并 `iupdate()`
+
+因此这里已经满足了“把元数据挂在真实 inode 上”的要求。
+
+### 10.3 内容摘要
+
+内容摘要现在也属于 inode 元数据的一部分。刷新逻辑：
 
 ```c
 static void
-file_summary_refresh(struct agent_file_meta *meta)
+inode_summary_refresh(struct inode *ip)
 {
-  struct inode *ip;
-  int n = 0;
-
-  begin_op();
-  ip = namei(meta->path);
-  if(ip){
-    ilock(ip);
-    if(ip->type == T_FILE)
-      n = readi(ip, 0, (uint64)meta->summary, 0,
-                sizeof(meta->summary) - 1);
-    iunlockput(ip);
-  }
-  end_op();
-  if(n < 0)
-    n = 0;
-  meta->summary[n] = 0;
+  memset(ip->summary, 0, sizeof(ip->summary));
+  n = readi(ip, 0, (uint64)ip->summary, 0, sizeof(ip->summary) - 1);
+  ...
 }
 ```
 
-哈希索引：
+当前策略仍然是“取文件前 64 字节作为摘要”，然后在 `query_file` 中用子串匹配 `keyword`。
+
+### 10.4 内存索引结构
+
+为了满足“查询性能优于遍历所有文件逐一检查”，内核维护了一个独立的内存索引层。
+
+缓存条目：
 
 ```c
-static uint
-file_attr_hash(const char *key, const char *value)
-{
-  uint hash = 5381;
-  ...
-  return hash % AGENT_FILE_INDEX_BUCKETS;
-}
+struct agent_file_meta {
+  int used;
+  uint inum;
+  char path[AGENT_FILE_PATH_MAX];
+  int attr_count;
+  char summary[INODE_SUMMARY_MAX];
+  struct inode_attr attrs[INODE_ATTR_MAX];
+};
 ```
 
-当前索引策略比较简单：每个文件使用第一个属性进入哈希桶。`query_file()` 如果有属性条件，就用第一个查询条件定位哈希桶，然后检查剩余条件和 keyword。
+倒排 posting：
 
-查询结果示例：
+```c
+struct agent_file_posting {
+  int used;
+  int entry_idx;
+  int next;
+  char key[INODE_ATTR_KEY_MAX];
+  char value[INODE_ATTR_VALUE_MAX];
+};
+```
 
-```text
-{status=ok,files=[{path=agentbmem,type=memory,owner=Agent-B,tags=social,summary=social memory alpha: Agent-B met Agent-A}],count=1,used_index=1,index_scanned=1,full_scanned=3}
+全局索引：
+
+```c
+static struct agent_file_meta file_meta[AGENT_FILE_META_MAX];
+static struct agent_file_posting file_postings[AGENT_FILE_POSTING_MAX];
+static int file_index[AGENT_FILE_INDEX_BUCKETS];
 ```
 
 其中：
 
 ```text
-used_index      是否使用属性索引
-index_scanned   索引候选扫描数量
-full_scanned    当前元数据表中文件数量
+file_meta:
+  缓存文件路径、attrs、summary，避免每次 query 都去逐个 ilock 文件
+
+file_postings:
+  为每个 key=value 建一个 posting 节点
+
+file_index:
+  哈希桶头，桶内是 posting 链表
 ```
 
-这些字段用于展示“按属性查询优于全量遍历”的效果。
+### 10.5 索引构建
+
+首次查询前，内核会从根目录开始递归扫描文件系统，建立缓存与 posting 索引：
+
+```c
+root = namei("/");
+ilock(root);
+file_index_walk(root, "");
+...
+file_rebuild_postings_locked();
+```
+
+`file_index_walk()` 会：
+
+```text
+1. 遍历目录项
+2. 对每个普通文件读取真实 inode 元数据
+3. 把 path + attrs + summary 放进 file_meta
+4. 为每个属性插入 posting
+```
+
+因此查询结果里虽然会返回路径，但路径只是“索引缓存的展示信息”；真正的元数据来源仍然是 inode。
+
+### 10.6 查询模式
+
+`query_file()` 现在支持两种模式：
+
+```text
+默认模式:
+  使用索引
+
+mode=scan:
+  强制全扫描
+```
+
+例如：
+
+```text
+query_file(type=config;owner=Agent-B;tags=plan;keyword=target)
+query_file(type=config;owner=Agent-B;tags=plan;keyword=target;mode=scan)
+```
+
+索引模式的策略是：
+
+```text
+1. 取第一个属性条件，例如 type=config
+2. 用 hash(type=config) 定位 posting bucket
+3. 扫描候选 posting
+4. 再检查剩余条件和 keyword
+```
+
+全扫描模式则直接遍历全部 `file_meta`。
+
+### 10.7 查询结果与性能字段
+
+`query_file()` 会返回：
+
+```text
+used_index
+index_scanned
+full_scanned
+ticks_cost
+```
+
+含义：
+
+```text
+used_index:
+  这次是否走索引
+
+index_scanned:
+  实际扫描了多少个候选条目
+
+full_scanned:
+  如果做全量遍历，当前需要检查多少个文件
+
+ticks_cost:
+  本次查询期间的 tick 差值
+```
+
+注意：`ticks_cost` 在小规模 benchmark 中可能为 0，因为 xv6 的 timer 粒度比较粗；但 `index_scanned` 与 `full_scanned` 是稳定的结构性性能数据。
+
+### 10.8 对比数据
+
+新增测试程序 `user/agentfsbench.c` 会创建一批带元数据的文件，然后分别执行：
+
+```text
+索引查询:
+  query_file(...keyword=target)
+
+强制全扫描:
+  query_file(...keyword=target;mode=scan)
+```
+
+实测输出：
+
+```text
+agentfsbench: compare indexed(index_scanned=9, full_scanned=57, ticks_cost=0)
+agentfsbench: compare fullscan(scanned=57, full_scanned=57, ticks_cost=0)
+agentfsbench: batch_ticks indexed=0 fullscan=0
+```
+
+这组数据说明：
+
+```text
+索引查询只检查了 9 个候选文件
+全扫描需要检查 57 个文件
+候选集规模明显小于逐一检查所有文件
+```
+
+因此，虽然单次 `ticks_cost` 在这个规模下没有拉开，但结构性扫描成本已经明显优于全量遍历，满足题目要求里的“查询性能优于遍历所有文件逐一检查，并提供对比数据”。
 
 ## 11. Agent Loop 内核运行机制
 
@@ -1040,6 +1173,38 @@ mmaptest: all tests succeeded
 agentlooptest: all tests passed
 ```
 
+### 13.5 agentfsbench
+
+`user/agentfsbench.c` 是任务四的性能对比测试程序。
+
+它会：
+
+```text
+1. 创建一批测试文件
+2. 为这些文件设置真实 inode 元数据
+3. 运行一次索引查询
+4. 运行一次强制全扫描查询
+5. 输出 index_scanned / full_scanned / ticks_cost
+```
+
+主要校验点：
+
+```text
+索引查询成功
+全扫描查询成功
+index_scanned < full_scanned
+mode=scan 时 scanned == full_scanned
+```
+
+实测输出：
+
+```text
+agentfsbench: compare indexed(index_scanned=9, full_scanned=57, ticks_cost=0)
+agentfsbench: compare fullscan(scanned=57, full_scanned=57, ticks_cost=0)
+agentfsbench: batch_ticks indexed=0 fullscan=0
+agentfsbench: all tests passed
+```
+
 ## 14. 构建与运行
 
 构建：
@@ -1060,6 +1225,7 @@ make qemu
 
 ```text
 agenttest
+agentfsbench
 agentlooptest
 usertests
 mmaptest
@@ -1076,10 +1242,9 @@ Ctrl-A 然后按 X
 当前实现已经覆盖基础任务和 AgentFS 查询扩展，但仍有一些边界：
 
 ```text
-AgentFS 属性表是运行时内存表，重启后不持久化
 Context 区由 uvmalloc 追加到用户地址空间末尾，不是独立 VMA
-内容摘要是前 128 字节子串匹配，不是 embedding 语义检索
-query_file 的索引策略比较简单，只按第一个属性条件走哈希桶
+内容摘要是前 64 字节子串匹配，不是 embedding 语义检索
+query_file 的索引策略使用“第一个属性条件 -> posting bucket -> 剩余条件过滤”，还不是多条件最优执行计划
 任务五当前只实现了消息事件，还没有扩展到文件修改等更多事件源
 send_message 仍是单消息槽，不是完整消息队列
 多 Agent 运行仍沿用 xv6 原始调度器，没有单独的 Agent 优先级策略
