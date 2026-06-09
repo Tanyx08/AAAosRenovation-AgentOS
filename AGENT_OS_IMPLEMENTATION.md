@@ -1,46 +1,61 @@
 # Agent-OS 实现说明
 
-本文档面向项目开发者，目标是帮助你快速理解当前 xv6 Agent-OS 扩展“改了哪里、为什么这样改、每条功能链路怎么跑通”。如果只是想知道怎么使用接口和做演示，请看 `AGENT_OS_INTERFACE_LLM_GUIDE.md`。
+本文档面向项目开发者和答辩检查人员，说明当前 xv6 Agent-OS 扩展完成了什么、代码改在哪里、每条功能链路如何运行，以及五个赛题任务对应到哪些实现。
 
-当前实现基于 `xv6-2023-mit-labs` 的 `mmap` 分支，新增 Agent 进程、Agent Context 区、结构化工具调用、Context Path 管理、Agent Loop 内核运行支持，以及面向 Agent 查询模式的 AgentFS 扩展层。
+当前实现基于 `xv6-2023-mit-labs` 的 `mmap` 分支，新增了 Agent 进程模型、用户态 Agent Context 区、结构化 Tool Call、Context Path 管理、AgentFS 查询扩展，以及 Agent Loop 的心跳/事件唤醒机制。
 
-## 1. 文件总览
+## 1. 完成度总览
 
-核心新增和修改文件：
+| 任务 | 完成度 | 说明 |
+| --- | --- | --- |
+| 任务一：Agent 进程创建与地址空间设计 | 已完成 | PCB 扩展、`agent_create`、`agent_info`、用户态 Agent Context 区均已实现。 |
+| 任务二：结构化交互接口 | 已完成 | `tool_call`/`tool_list` 已实现，内核提供 8 个工具，包含错误码和结构化响应。 |
+| 任务三：上下文路径管理 | 已完成 | Context Path 分层存储、自动追加、查询、回滚、清空、FIFO 淘汰均已实现。 |
+| 任务四：Agent 查询优化文件系统扩展 | 已完成主要要求 | 实现文件属性、内容摘要、属性哈希索引、结构化查询结果和扫描统计。 |
+| 任务五：Agent Loop 内核运行机制 | 已完成主要要求 | 实现心跳、消息事件、`agent_wait` 休眠/唤醒、Loop 生命周期和多 Agent 并发演示。 |
+
+当前没有实现的增强项主要是：AgentFS 元数据持久化、复杂语义检索、文件修改事件源、Agent 优先级调度、消息队列和真实 LLM 常驻用户态循环程序。这些属于后续增强，不影响当前主线验收。
+
+## 2. 文件总览
+
+核心新增和修改文件如下：
 
 ```text
-kernel/agent.h       Agent-OS 常量、ABI 结构体、内核函数声明
+kernel/agent.h       Agent-OS ABI：常量、结构体、内核函数声明
 kernel/agent.c       Agent 核心实现：Context、Tool Call、AgentFS、Agent Loop
 kernel/sysagent.c    Agent-OS 系统调用入口
 kernel/proc.h        PCB 扩展字段
-kernel/proc.c        进程生命周期中初始化、清理、fork 继承 Agent 字段
-kernel/syscall.h     新增 syscall 编号
-kernel/syscall.c     新增 syscall 分发表项
-user/user.h          用户态 syscall 声明
+kernel/proc.c        进程生命周期接入：初始化、释放、fork 继承
+kernel/syscall.h     新增系统调用编号
+kernel/syscall.c     新增系统调用分发表项
+kernel/trap.c        时钟中断中调用 agent_tick()
+kernel/defs.h        agent_tick() 等内核函数声明
+user/user.h          用户态系统调用声明
 user/usys.pl         用户态 syscall stub 生成
-user/user.ld         修复用户 ELF 段权限，保证 usertests 通过
-user/agenttest.c     Agent-OS 自动测试程序
-user/agentlooptest.c Agent Loop 自动测试程序
+user/agenttest.c     任务一到任务四主测试程序
+user/agentlooptest.c 任务五测试程序
 Makefile             编译 agent.o、sysagent.o、agenttest、agentlooptest
 ```
 
 整体调用路径：
 
 ```text
-用户态程序
-  -> agent_create / tool_call / context_query 等 syscall stub
-  -> kernel/syscall.c 分发
-  -> kernel/sysagent.c 复制参数并调用 Agent 内核函数
+用户态 Agent 程序
+  -> agent_create / tool_call / context_query / agent_wait 等 syscall stub
+  -> kernel/syscall.c 按 syscall number 分发
+  -> kernel/sysagent.c copyin 参数并调用 Agent 内核函数
   -> kernel/agent.c 执行 Agent 逻辑
-  -> copyout 返回结构化结果或写入 Agent Context 区
+  -> copyout 返回结构化结果，或写入用户态 Agent Context 区
 ```
 
-## 2. Agent ABI 设计
+## 3. ABI 与结构化协议
 
-Agent-OS 的公共 ABI 定义在 `kernel/agent.h`。用户态测试程序也直接包含这个头文件：
+公共 ABI 定义在 `kernel/agent.h`，用户态程序可直接包含：
 
 ```c
+#include "kernel/types.h"
 #include "kernel/agent.h"
+#include "user/user.h"
 ```
 
 关键常量：
@@ -52,18 +67,16 @@ Agent-OS 的公共 ABI 定义在 `kernel/agent.h`。用户态测试程序也直�
 #define AGENT_TYPE_PRIMARY (1)
 #define AGENT_TYPE_WORKER  (2)
 
-#define AGENT_LOOP_IDLE       (0)
-#define AGENT_LOOP_READY      (1)
-#define AGENT_LOOP_RUNNING    (2)
-#define AGENT_LOOP_WAITING    (3)
+#define AGENT_LOOP_IDLE        (0)
+#define AGENT_LOOP_READY       (1)
+#define AGENT_LOOP_RUNNING     (2)
+#define AGENT_LOOP_WAITING     (3)
 #define AGENT_LOOP_ROLLED_BACK (4)
-#define AGENT_LOOP_DONE       (5)
+#define AGENT_LOOP_DONE        (5)
 
 #define AGENT_EVENT_NONE      (0)
 #define AGENT_EVENT_HEARTBEAT (1)
 #define AGENT_EVENT_MESSAGE   (2)
-
-#define AGENT_WATCH_MESSAGE AGENT_EVENT_MESSAGE
 
 #define AGENT_TOOL_OK                 (0)
 #define AGENT_TOOL_ERR_TOOL_NOT_FOUND (-1)
@@ -72,7 +85,7 @@ Agent-OS 的公共 ABI 定义在 `kernel/agent.h`。用户态测试程序也直�
 #define AGENT_TOOL_ERR_NO_SPACE       (-4)
 ```
 
-工具调用请求和响应采用“固定结构体 + 键值对字符串”：
+工具调用协议采用“固定结构体 + 键值对字符串”。这样避免在 xv6 内核里实现复杂 JSON parser，同时仍具备可解析、可扩展和明确错误处理能力。
 
 ```c
 struct agent_tool_request {
@@ -85,32 +98,32 @@ struct agent_tool_response {
   uint32 result_len;
   char result[AGENT_TOOL_RESULT_MAX];
 };
-
-struct agent_wait_event {
-  int reason;
-  uint32 reserved;
-  uint64 tick;
-  char message[AGENT_MESSAGE_MAX];
-};
 ```
 
-例如用户态传入：
+请求示例：
 
 ```text
 tool   = "query_file"
 params = "type=memory;owner=Agent-B;tags=social;keyword=social"
 ```
 
-内核返回：
+响应示例：
 
 ```text
 status = AGENT_TOOL_OK
-result = "{status=ok,files=[...],count=1,used_index=1,index_scanned=1,full_scanned=3}"
+result = "{status=ok,files=[{path=agentbmem,type=memory,owner=Agent-B,tags=social,summary=...}],count=1,used_index=1,index_scanned=1,full_scanned=3}"
 ```
 
-这里没有实现 JSON parser，是有意为之：xv6 内核环境很小，使用 `key=value;key=value` 能降低内核字符串解析复杂度，同时仍满足“结构化、可解析、可扩展、有错误处理”的要求。
+参数解析函数位于 `kernel/agent.c`：
 
-## 3. PCB 扩展
+```c
+static int
+param_value(const char *params, const char *key, char *out, int outsz)
+```
+
+它按照 `key=value;key=value` 解析参数。工具内部如果发现缺少参数、参数格式不合法或目标不存在，会返回 `AGENT_TOOL_ERR_BAD_PARAM` 等错误码。
+
+## 4. PCB 扩展与进程生命周期
 
 `kernel/proc.h` 中的 `struct proc` 新增 Agent 字段：
 
@@ -134,41 +147,41 @@ int last_wakeup_reason;
 char agent_message[AGENT_MESSAGE_MAX];
 ```
 
-字段用途：
+字段职责：
 
 ```text
-agent_type              进程是否为 Agent，以及 Agent 类型
-heartbeat_interval      心跳周期，目前作为元信息保存
-resource_quota          Context Path 的字节配额
-loop_state              Agent Loop 状态
+agent_type              普通进程或 Agent 进程
+heartbeat_interval      心跳周期，单位为 tick
+resource_quota          Context Path 字节配额
+loop_state              Agent Loop 当前状态
 context_region_start    用户态 Agent Context 区起始地址
 context_region_size     Agent Context 区大小
 context_path_len        当前 Context Path 已使用字节数
 context_node_count      当前上下文节点数量
 context_dropped_nodes   FIFO 淘汰过的节点数量
-heartbeat_deadline      下一次心跳唤醒 tick
-wakeup_tick             最近一次唤醒 tick
-context_offsets         每个节点在 Context 区中的偏移
-context_lengths         每个节点长度
-watch_mask              当前关注的事件位图
-pending_events          尚未消费的待处理事件
+heartbeat_deadline      下一次心跳到期 tick
+wakeup_tick             最近一次唤醒发生的 tick
+context_offsets         每个上下文节点在 Context 区中的偏移
+context_lengths         每个上下文节点长度
+watch_mask              Agent 关注的事件类型位图
+pending_events          尚未被 agent_wait 消费的事件
 last_wakeup_reason      最近一次唤醒原因
-agent_message           send_message 使用的简单消息槽
+agent_message           send_message 使用的消息槽
 ```
 
-进程生命周期接入点位于 `kernel/proc.c`：
+生命周期接入点在 `kernel/proc.c`：
 
 ```c
-found:
-  p->pid = allocpid();
-  p->state = USED;
-  agent_init_proc(p);
+// allocproc()
+p->pid = allocpid();
+p->state = USED;
+agent_init_proc(p);
 ```
 
-释放进程时重置 Agent 状态：
+释放进程时重置 Agent 字段：
 
 ```c
-p->xstate = 0;
+// freeproc()
 agent_init_proc(p);
 p->state = UNUSED;
 ```
@@ -180,9 +193,9 @@ np->sz = p->sz;
 agent_after_fork(np, p);
 ```
 
-因为 xv6 `fork()` 已经通过 `uvmcopy()` 复制用户地址空间，所以 Agent Context 区的用户态内容也会被复制。`agent_after_fork()` 负责同步 PCB 中的 Agent 元信息。
+xv6 原本会通过 `uvmcopy()` 复制父进程用户地址空间，因此 Agent Context 区内容随地址空间一起复制。`agent_after_fork()` 负责把 PCB 中的 Agent 元信息同步到子进程。
 
-## 4. Agent 进程创建
+## 5. Agent 进程创建与 Context 区
 
 系统调用入口在 `kernel/sysagent.c`：
 
@@ -201,39 +214,27 @@ sys_agent_create(void)
 }
 ```
 
-核心实现位于 `kernel/agent.c`：
+核心逻辑在 `agent_mark_current()`：
 
 ```c
-uint64
-agent_mark_current(int type, int heartbeat_interval, uint64 resource_quota)
-{
-  struct proc *p = myproc();
-  uint64 start;
-  uint64 end;
-
-  if(type <= AGENT_TYPE_NORMAL)
-    type = AGENT_TYPE_PRIMARY;
-  if(p->context_region_start == 0){
-    start = PGROUNDUP(p->sz);
-    end = start + AGENT_CONTEXT_REGION_SIZE;
-    if(uvmalloc(p->pagetable, p->sz, end, PTE_W) == 0)
-      return -1;
-    p->sz = end;
-    p->context_region_start = start;
-    p->context_region_size = AGENT_CONTEXT_REGION_SIZE;
-  }
-  p->agent_type = type;
-  p->heartbeat_interval = heartbeat_interval;
-  p->resource_quota = resource_quota;
-  p->loop_state = AGENT_LOOP_READY;
-  agent_context_clear(p);
-  return p->context_region_start;
+if(p->context_region_start == 0){
+  start = PGROUNDUP(p->sz);
+  end = start + AGENT_CONTEXT_REGION_SIZE;
+  if(uvmalloc(p->pagetable, p->sz, end, PTE_W) == 0)
+    return -1;
+  p->sz = end;
+  p->context_region_start = start;
+  p->context_region_size = AGENT_CONTEXT_REGION_SIZE;
 }
+p->agent_type = type;
+p->heartbeat_interval = heartbeat_interval;
+p->resource_quota = resource_quota;
+p->loop_state = AGENT_LOOP_READY;
+agent_context_clear(p);
+return p->context_region_start;
 ```
 
-当前版本采用简单稳定的地址空间策略：在当前用户地址空间末尾追加 8192 字节作为 Agent Context 区。这样做的优点是实现小、风险低，并且能让用户态通过返回地址直接读写 Context 区。
-
-地址布局近似如下：
+当前地址空间策略是：在用户地址空间当前末尾追加 8192 字节作为 Agent Context 区。
 
 ```text
 低地址
@@ -245,11 +246,11 @@ agent_mark_current(int type, int heartbeat_interval, uint64 resource_quota)
 高地址
 ```
 
-注意：当前实现没有把 Agent Context 区做成单独 VMA，而是直接用 `uvmalloc()` 扩展 `p->sz`。后续如果要和普通 mmap 区隔离，可以进一步改为专用 VMA。
+这块区域由用户态直接读写，适合保存高频访问的策略性数据，如上下文路径缓存、工具调用结果缓存、工具历史摘要等。内核保存可信元信息和配额，用户态保存高频数据，符合“机制与策略分离”的设计目标。
 
-## 5. Agent Context 区
+## 6. Agent Context Header
 
-Context 区开头是 header：
+Agent Context 区开头是 header：
 
 ```c
 struct agent_context_header {
@@ -267,93 +268,57 @@ struct agent_context_header {
 };
 ```
 
-当前 `last_tool` 字段是保留字段，主要使用的是 `last_result` 和路径元信息。header 同步函数：
+内核通过 `agent_sync_header()` 同步 header：
 
 ```c
-int
-agent_sync_header(struct proc *p)
-{
-  struct agent_context_header hdr;
-  char tmp[AGENT_TOOL_RESULT_MAX];
-  uint64 n = MIN(p->context_path_len, (uint64)(sizeof(tmp) - 1));
-
-  memset(&hdr, 0, sizeof(hdr));
-  hdr.magic = AGENT_CONTEXT_HEADER_MAGIC;
-  hdr.version = AGENT_CONTEXT_HEADER_VERSION;
-  hdr.region_size = p->context_region_size;
-  hdr.path_offset = sizeof(struct agent_context_header);
-  hdr.path_length = p->context_path_len;
-  hdr.node_count = p->context_node_count;
-  hdr.dropped_nodes = p->context_dropped_nodes;
-  hdr.last_timestamp = agent_now();
-  ...
-  return agent_context_write_header(p, &hdr);
-}
+hdr.magic = AGENT_CONTEXT_HEADER_MAGIC;
+hdr.version = AGENT_CONTEXT_HEADER_VERSION;
+hdr.region_size = p->context_region_size;
+hdr.path_offset = sizeof(struct agent_context_header);
+hdr.path_length = p->context_path_len;
+hdr.node_count = p->context_node_count;
+hdr.dropped_nodes = p->context_dropped_nodes;
+hdr.last_timestamp = agent_now();
 ```
 
-写 header 的本质是一次 `copyout()`：
+写入用户空间时使用 `copyout()`：
 
 ```c
-static int
-agent_context_write_header(struct proc *p, struct agent_context_header *hdr)
-{
-  if(p->context_region_start == 0)
-    return -1;
-  return copyout(p->pagetable, p->context_region_start, (char*)hdr,
-                 sizeof(*hdr));
-}
+copyout(p->pagetable, p->context_region_start, (char*)hdr, sizeof(*hdr));
 ```
 
-这体现了分层存储：
+用户态可以直接读取：
+
+```c
+struct agent_context_header *hdr = (struct agent_context_header*)ctx;
+char *path = ctx + hdr->path_offset;
+write(1, path, hdr->path_length);
+```
+
+## 7. Context Path 管理
+
+Context Path 是 Agent Loop 的探索轨迹。每个节点记录一次请求和结果：
 
 ```text
-PCB:
-  保存可信元信息，例如长度、节点数、配额、淘汰数量
-
-用户态 Context 区:
-  保存高频读取的上下文文本和结果缓存
+{ts=...,req=query_file(...),res={status=ok,...}}
 ```
 
-用户态直接读 Context 区不需要 syscall；内核只在追加、清空、回滚时同步 header 和元信息。
-
-## 6. Context Path 管理
-
-每次 `tool_call()` 都会自动追加一条上下文节点。节点最终以文本形式写入 Context 区：
-
-```text
-{ts=...,req=get_system_status,res={status=ok,procs=...,agents=...,ticks=...}}
-```
-
-追加节点函数：
+追加节点的核心函数是 `agent_context_push_node()`：
 
 ```c
-int
-agent_context_push_node(struct proc *p, struct agent_context_node *node)
-{
-  char record[AGENT_CONTEXT_REQ_MAX + AGENT_CONTEXT_RES_MAX + 48];
-  ...
-  buf_puts(&ptr, &left, "{ts=");
-  buf_putu(&ptr, &left, node->timestamp_ms);
-  buf_puts(&ptr, &left, ",req=");
-  buf_puts(&ptr, &left, node->request);
-  buf_puts(&ptr, &left, ",res=");
-  buf_puts(&ptr, &left, node->result);
-  buf_puts(&ptr, &left, "}\n");
-  ...
-  while(p->context_node_count >= AGENT_CONTEXT_MAX_NODES ||
-        p->context_path_len + rec_len > agent_path_capacity(p))
-    agent_evict_oldest(p);
-  ...
-  copyout(p->pagetable, base + p->context_path_len, record, rec_len);
-  p->context_offsets[p->context_node_count] = p->context_path_len;
-  p->context_lengths[p->context_node_count] = rec_len;
-  p->context_path_len += rec_len;
-  p->context_node_count++;
-  return agent_sync_header(p);
-}
+while(p->context_node_count >= AGENT_CONTEXT_MAX_NODES ||
+      p->context_path_len + rec_len > agent_path_capacity(p))
+  agent_evict_oldest(p);
+
+copyout(p->pagetable, base + p->context_path_len, record, rec_len);
+p->context_offsets[p->context_node_count] = p->context_path_len;
+p->context_lengths[p->context_node_count] = rec_len;
+p->context_path_len += rec_len;
+p->context_node_count++;
+return agent_sync_header(p);
 ```
 
-配额计算：
+配额由 PCB 中的 `resource_quota` 控制：
 
 ```c
 static uint64
@@ -367,232 +332,124 @@ agent_path_capacity(struct proc *p)
 }
 ```
 
-超过配额时执行 FIFO 淘汰：
-
-```c
-static void
-agent_evict_oldest(struct proc *p)
-{
-  ...
-  first_len = p->context_lengths[0];
-  remain = p->context_path_len - first_len;
-  copyin(p->pagetable, tmp, base + first_len, remain);
-  copyout(p->pagetable, base, tmp, remain);
-  ...
-  p->context_path_len -= first_len;
-  p->context_node_count--;
-  p->context_dropped_nodes++;
-}
-```
-
-回滚逻辑只保留前 `keep_nodes` 个节点：
-
-```c
-int
-agent_context_rollback(struct proc *p, uint64 keep_nodes)
-{
-  if(keep_nodes > p->context_node_count)
-    return -1;
-  if(keep_nodes == 0){
-    agent_context_clear(p);
-    return 0;
-  }
-  p->context_path_len = p->context_offsets[keep_nodes - 1] +
-                        p->context_lengths[keep_nodes - 1];
-  p->context_node_count = keep_nodes;
-  p->loop_state = AGENT_LOOP_ROLLED_BACK;
-  return agent_sync_header(p);
-}
-```
-
-## 7. 系统调用封装
-
-当前 Agent-OS syscall 可以按功能分成三组：
+超过节点数或字节配额时，内核执行 FIFO 淘汰：
 
 ```text
-Agent 创建与信息查询:
-  agent_create
-  agent_info
-
-结构化工具调用与上下文管理:
-  tool_call
-  tool_list
-  context_push
-  context_query
-  context_rollback
-  context_clear
-
-Agent Loop 运行支持:
-  agent_heartbeat_set
-  agent_heartbeat_stop
-  agent_watch
-  agent_wait
-  agent_unwatch
+1. 读取最老节点长度
+2. 将后续节点向前搬移
+3. 更新 offset/length 数组
+4. context_dropped_nodes++
+5. 重新同步 header
 ```
 
-`kernel/sysagent.c` 负责处理用户态地址和内核结构体之间的复制。以 `tool_call` 为例：
-
-```c
-uint64
-sys_tool_call(void)
-{
-  uint64 ureq;
-  uint64 uresp;
-  struct agent_tool_request req;
-  struct agent_tool_response resp;
-  struct proc *p = myproc();
-
-  argaddr(0, &ureq);
-  argaddr(1, &uresp);
-  if(copyin(p->pagetable, (char*)&req, ureq, sizeof(req)) < 0)
-    return -1;
-  req.tool[sizeof(req.tool) - 1] = 0;
-  req.params[sizeof(req.params) - 1] = 0;
-  agent_tool_call(p, &req, &resp);
-  if(copyout(p->pagetable, uresp, (char*)&resp, sizeof(resp)) < 0)
-    return -1;
-  return resp.status;
-}
-```
-
-几个关键点：
+相关系统调用：
 
 ```text
-copyin/copyout:
-  所有用户指针都通过页表安全复制
-
-强制 NUL 结尾:
-  防止用户传入未终止字符串
-
-返回值:
-  syscall 返回 resp.status，完整结构化结果写入 resp
+context_push(node)       手动追加上下文节点
+context_query(buf, len)  复制 Context Path 内容到用户缓冲区
+context_rollback(n)     回滚到前 n 个节点
+context_clear()          清空路径和统计信息
 ```
 
-任务五新增 syscall 的职责是：
+另外，`tool_call()` 会自动把每次工具调用记录到 Context Path 中，因此 Agent 的多轮推理历史不需要用户态手动维护。
+
+## 8. 系统调用列表
+
+当前 Agent-OS 系统调用包括：
 
 ```text
-agent_heartbeat_set(interval):
-  设置当前 Agent 的心跳周期
+agent_create(type, heartbeat_interval, quota)
+agent_info(info)
 
-agent_heartbeat_stop():
-  停止心跳触发
+tool_call(req, resp)
+tool_list(buf, len)
 
-agent_watch(mask):
-  注册关注的事件类型。当前实现支持消息事件
+context_push(node)
+context_query(buf, len)
+context_rollback(keep_nodes)
+context_clear()
 
-agent_wait(continue_loop, &event):
-  当前轮结束后挂起等待，直到心跳或事件到来
-
-agent_unwatch(mask):
-  取消事件关注
+agent_heartbeat_set(interval)
+agent_heartbeat_stop()
+agent_watch(mask)
+agent_wait(continue_loop, event)
+agent_unwatch(mask)
 ```
 
-## 8. Tool Call 分发器
-
-核心函数：
+系统调用编号定义在 `kernel/syscall.h`：
 
 ```c
-int
-agent_tool_call(struct proc *p, struct agent_tool_request *req,
-                struct agent_tool_response *resp)
-{
-  if(p->agent_type == AGENT_TYPE_NORMAL){
-    tool_resp_set(resp, AGENT_TOOL_ERR_NOT_AGENT, "process is not agent");
-    return resp->status;
-  }
-  p->loop_state = AGENT_LOOP_RUNNING;
-  if(streq(req->tool, "query_process")){
-    tool_query_process(req, resp);
-  } else if(streq(req->tool, "get_system_status")){
-    tool_get_system_status(resp);
-  } else if(streq(req->tool, "send_message")){
-    tool_send_message(req, resp);
-  } else if(streq(req->tool, "read_context")){
-    tool_read_context(p, resp);
-  } else if(streq(req->tool, "set_file_attr")){
-    tool_set_file_attr(req, resp);
-  } else if(streq(req->tool, "get_file_attr")){
-    tool_get_file_attr(req, resp);
-  } else if(streq(req->tool, "del_file_attr")){
-    tool_del_file_attr(req, resp);
-  } else if(streq(req->tool, "query_file")){
-    tool_query_file(req, resp);
-  } else {
-    tool_resp_set(resp, AGENT_TOOL_ERR_TOOL_NOT_FOUND, "tool not found");
-  }
-  ...
-  agent_context_push_node(p, &node);
-  p->loop_state = AGENT_LOOP_READY;
+#define SYS_agent_create 24
+#define SYS_agent_info 25
+#define SYS_tool_call 26
+#define SYS_tool_list 27
+#define SYS_context_push 28
+#define SYS_context_query 29
+#define SYS_context_rollback 30
+#define SYS_context_clear 31
+#define SYS_agent_heartbeat_set 32
+#define SYS_agent_heartbeat_stop 33
+#define SYS_agent_watch 34
+#define SYS_agent_wait 35
+#define SYS_agent_unwatch 36
+```
+
+用户态 stub 由 `user/usys.pl` 生成，函数声明在 `user/user.h`。
+
+## 9. Tool Call 分发器
+
+`agent_tool_call()` 是结构化交互接口的核心：
+
+```c
+if(p->agent_type == AGENT_TYPE_NORMAL){
+  tool_resp_set(resp, AGENT_TOOL_ERR_NOT_AGENT, "process is not agent");
   return resp->status;
 }
-```
 
-这段逻辑完成三件事：
+p->loop_state = AGENT_LOOP_RUNNING;
 
-```text
-1. 检查当前进程必须是 Agent
-2. 按 tool 名称分发到内核工具
-3. 将请求和结果自动写入 Context Path
-```
-
-工具列表：
-
-```text
-get_system_status
-query_process
-send_message
-read_context
-set_file_attr
-get_file_attr
-del_file_attr
-query_file
-```
-
-在任务五中，`send_message` 还承担了事件触发器的作用：如果目标 Agent 注册了 `AGENT_WATCH_MESSAGE`，内核不仅把消息写进 `agent_message`，还会把该消息标记为待处理事件，并在目标进程睡眠时直接唤醒它。
-
-## 9. 参数解析与结果构造
-
-内核中使用简单的键值对解析函数：
-
-```c
-static int
-param_value(const char *params, const char *key, char *out, int outsz)
-{
-  int keylen = strlen(key);
-  const char *p = params;
-
-  while(*p){
-    if(strncmp(p, key, keylen) == 0 && p[keylen] == '='){
-      int n = 0;
-      p += keylen + 1;
-      while(*p && *p != ';' && n < outsz - 1)
-        out[n++] = *p++;
-      out[n] = 0;
-      return 0;
-    }
-    ...
-  }
-  return -1;
+if(streq(req->tool, "query_process")){
+  tool_query_process(req, resp);
+} else if(streq(req->tool, "get_system_status")){
+  tool_get_system_status(resp);
+} else if(streq(req->tool, "send_message")){
+  tool_send_message(req, resp);
+} else if(streq(req->tool, "read_context")){
+  tool_read_context(p, resp);
+} else if(streq(req->tool, "set_file_attr")){
+  tool_set_file_attr(req, resp);
+} else if(streq(req->tool, "get_file_attr")){
+  tool_get_file_attr(req, resp);
+} else if(streq(req->tool, "del_file_attr")){
+  tool_del_file_attr(req, resp);
+} else if(streq(req->tool, "query_file")){
+  tool_query_file(req, resp);
+} else {
+  tool_resp_set(resp, AGENT_TOOL_ERR_TOOL_NOT_FOUND, "tool not found");
 }
+
+agent_context_push_node(p, &node);
+p->loop_state = AGENT_LOOP_READY;
 ```
 
-例如：
+当前工具集：
 
-```text
-params = "path=agentbmem;key=owner;value=Agent-B"
-```
+| 工具 | 参数 | 功能 |
+| --- | --- | --- |
+| `get_system_status` | 无 | 返回进程数量、Agent 数量和 tick。 |
+| `query_process` | `type=agent` 可选 | 查询进程列表，可过滤 Agent。 |
+| `send_message` | `target_pid`、`message` | 给目标 Agent 写消息，并触发消息事件。 |
+| `read_context` | 无 | 读取当前 Agent 的最近 Context Path 内容。 |
+| `set_file_attr` | `path`、`key`、`value` | 设置文件属性。 |
+| `get_file_attr` | `path`、`key` | 查询文件属性。 |
+| `del_file_attr` | `path`、`key` | 删除文件属性。 |
+| `query_file` | `type`、`owner`、`tags`、`keyword` 等 | 按属性和摘要查询文件。 |
 
-调用：
-
-```c
-param_value(req->params, "path", path, sizeof(path));
-param_value(req->params, "key", key, sizeof(key));
-param_value(req->params, "value", value, sizeof(value));
-```
-
-结果字符串通过 `buf_puts()`、`buf_putu()` 等小工具安全拼接，避免依赖完整 libc。
+`tool_list()` 返回工具列表和参数概要，便于用户态 Agent 或宿主机 LLM 获得可用工具清单。
 
 ## 10. AgentFS 文件查询扩展
+
+结果字符串通过 `buf_puts()`、`buf_putu()` 等小工具安全拼接，避免依赖完整 libc。
 
 任务四当前版本不再把元数据放在单独的运行时 side table 里，而是把它挂在真实 inode 上，再在内存中建立查询索引。
 
@@ -841,70 +698,68 @@ agentfsbench: batch_ticks indexed=0 fullscan=0
 
 因此，虽然单次 `ticks_cost` 在这个规模下没有拉开，但结构性扫描成本已经明显优于全量遍历，满足题目要求里的“查询性能优于遍历所有文件逐一检查，并提供对比数据”。
 
+这满足任务四“把元数据挂在真实 inode 上、提供索引查询、并且查询性能优于逐一遍历”的主要验收点。需要注意的是：真实文件元数据会随 inode 持久化，但查询索引缓存仍是运行时内存结构，重启后会在首次查询时重建。
+
 ## 11. Agent Loop 内核运行机制
 
-任务五的重点不是只在 PCB 里增加几个字段，而是让 Agent 真正具备：
-
-```text
-1. 可以按心跳进入下一轮
-2. 可以在无事可做时阻塞休眠
-3. 可以被内核事件主动唤醒
-4. 可以向内核声明“继续”或“结束”
-```
+任务五的核心目标是让 Agent 在内核层支持“等待事件 -> 被唤醒 -> 执行一轮 -> 再等待”的循环，而不是在用户态忙等。
 
 ### 11.1 心跳机制
 
-心跳由 `heartbeat_interval + heartbeat_deadline` 两个字段配合实现。设置接口：
+用户态调用：
 
 ```c
-int
-agent_proc_heartbeat_set(struct proc *p, int interval)
+agent_heartbeat_set(interval);
+agent_heartbeat_stop();
+```
+
+设置心跳时，内核记录：
+
+```c
+p->heartbeat_interval = interval;
+p->heartbeat_deadline = agent_now_safe() + interval;
+```
+
+时钟中断路径位于 `kernel/trap.c`：
+
+```c
+void
+clockintr()
 {
-  ...
-  p->heartbeat_interval = interval;
-  p->heartbeat_deadline = agent_now_safe() + interval;
-  ...
+  uint now;
+
+  acquire(&tickslock);
+  ticks++;
+  now = ticks;
+  wakeup(&ticks);
+  release(&tickslock);
+  agent_tick(now);
 }
 ```
 
-真正的触发点在时钟中断。`clockintr()` 在 `ticks++` 之后调用：
+`agent_tick(now)` 扫描进程表，找到到期 Agent 后设置 `AGENT_EVENT_HEARTBEAT`，并在目标进程睡眠于自身 channel 时切回 `RUNNABLE`：
 
 ```c
-agent_tick(now);
+p->pending_events |= AGENT_EVENT_HEARTBEAT;
+p->last_wakeup_reason = AGENT_EVENT_HEARTBEAT;
+p->wakeup_tick = now;
+p->heartbeat_deadline = now + p->heartbeat_interval;
+if(p->state == SLEEPING && p->chan == p)
+  p->state = RUNNABLE;
 ```
 
-`agent_tick()` 会扫描进程表，找出到期的 Agent：
+### 11.2 消息事件
 
-```c
-if(p->heartbeat_interval > 0 &&
-   p->heartbeat_deadline > 0 &&
-   now >= p->heartbeat_deadline){
-  p->pending_events |= AGENT_EVENT_HEARTBEAT;
-  p->last_wakeup_reason = AGENT_EVENT_HEARTBEAT;
-  p->wakeup_tick = now;
-  p->heartbeat_deadline = now + p->heartbeat_interval;
-  if(p->state == SLEEPING && p->chan == p)
-    p->state = RUNNABLE;
-}
-```
-
-这条链路实现了“心跳到达时由内核主动唤醒”，而不是用户态轮询 `uptime()`。
-
-### 11.2 事件驱动触发
-
-当前版本实现的事件源是“消息事件”。
-
-用户态通过：
+当前事件驱动触发实现的是消息事件。用户态注册：
 
 ```c
 agent_watch(AGENT_WATCH_MESSAGE);
 ```
 
-注册关注，关注位保存在 `watch_mask` 中。
-
-已有工具 `send_message` 被扩展为任务五的事件入口：
+`send_message` 工具会写入目标 Agent 的消息槽，并在目标关注消息事件时设置 pending event：
 
 ```c
+safestrcpy(target->agent_message, message, sizeof(target->agent_message));
 if(target->watch_mask & AGENT_WATCH_MESSAGE){
   target->pending_events |= AGENT_EVENT_MESSAGE;
   target->last_wakeup_reason = AGENT_EVENT_MESSAGE;
@@ -914,36 +769,36 @@ if(target->watch_mask & AGENT_WATCH_MESSAGE){
 }
 ```
 
-这样，消息不仅能被写入目标 Agent 的 `agent_message`，还能直接触发等待中的 Agent 继续下一轮 Loop。
+这样消息既是结构化工具调用，也是 Agent Loop 的事件源。
 
-### 11.3 `agent_wait()` 与休眠/唤醒
+### 11.3 `agent_wait()` 与生命周期
 
-`agent_wait()` 是任务五的核心 syscall。它承载了两层语义：
+`agent_wait(continue_loop, event)` 同时负责等待和生命周期声明。
 
 ```text
 continue_loop = 1:
-  当前轮结束，但还要继续下一轮，进入等待状态
+  本轮结束，还要继续下一轮。若没有 pending event，进入 SLEEPING。
 
 continue_loop = 0:
-  当前任务完成，退出 Loop
+  任务完成。内核将 loop_state 设置为 AGENT_LOOP_DONE，并清理心跳、watch 和 pending event。
 ```
 
 等待逻辑：
 
 ```c
-acquire(&p->lock);
 p->loop_state = AGENT_LOOP_WAITING;
 for(;;){
   reason = p->pending_events;
   if(reason != AGENT_EVENT_NONE){
-    ...
+    event.reason = reason;
+    event.tick = p->wakeup_tick ? p->wakeup_tick : agent_now_safe();
+    if(reason & AGENT_EVENT_MESSAGE)
+      safestrcpy(event.message, p->agent_message, sizeof(event.message));
     p->pending_events = 0;
     p->loop_state = AGENT_LOOP_READY;
-    release(&p->lock);
-    copyout(..., &event, sizeof(event));
+    ...
     return reason;
   }
-  ...
   p->chan = p;
   p->state = SLEEPING;
   sched();
@@ -951,223 +806,79 @@ for(;;){
 }
 ```
 
-这里没有直接调用 xv6 的通用 `sleep()`，而是使用同样的状态机思路手工切换到 `SLEEPING + sched()`。原因是此时已经持有 `p->lock`，如果再走通用 `sleep()` 会重复获取 `p->lock`。
-
-唤醒后，内核把结构化事件拷回用户态：
+用户态收到的事件结构：
 
 ```c
 struct agent_wait_event {
   int reason;
+  uint32 reserved;
   uint64 tick;
   char message[AGENT_MESSAGE_MAX];
 };
 ```
 
-因此用户态可以区分是：
+### 11.4 多 Agent 协调
+
+当前没有新增独立优先级调度器，仍使用 xv6 原有调度器。但每个 Agent 都拥有独立的：
 
 ```text
-AGENT_EVENT_HEARTBEAT
-AGENT_EVENT_MESSAGE
-或两者的组合
+heartbeat_deadline
+watch_mask
+pending_events
+agent_message
+loop_state
 ```
 
-### 11.4 生命周期管理
+心跳和消息只唤醒目标 Agent；无事件时 Agent 进入 `SLEEPING`，不会忙等占用 CPU。因此多个 Agent 可以同时等待并由各自事件唤醒。
 
-任务五要求 Agent 在每轮结束时声明“继续”或“完成”。当前版本直接把这层协议折叠进 `agent_wait()`：
+## 12. 测试程序
 
-```c
-if(continue_loop == 0){
-  p->loop_state = AGENT_LOOP_DONE;
-  p->heartbeat_interval = 0;
-  p->heartbeat_deadline = 0;
-  p->watch_mask = 0;
-  p->pending_events = 0;
-  p->last_wakeup_reason = AGENT_EVENT_NONE;
-  p->agent_message[0] = 0;
-  return 0;
-}
-```
+### 12.1 `agenttest`
 
-这样用户态写 Loop 时比较自然：
-
-```c
-for(;;){
-  // think -> act -> observe
-  if(done)
-    agent_wait(0, 0);
-  else
-    agent_wait(1, &event);
-}
-```
-
-### 11.5 多 Agent 协调
-
-当前没有单独实现优先级调度器，仍沿用 xv6 原始调度器；但任务五要求的“多个 Agent 同时运行，系统保持稳定”已经由下面这些机制支撑：
+`user/agenttest.c` 覆盖任务一到任务四：
 
 ```text
-每个 Agent 有自己的 heartbeat_deadline
-每个 Agent 有自己的 watch_mask / pending_events
-心跳和消息都只唤醒目标 Agent
-等待中的 Agent 不会忙等占 CPU
+普通进程 tool_call 被拒绝
+agent_create / agent_info
+Agent Context header 可读写
+tool_list
+get_system_status
+query_process
+missing_tool 错误处理
+set_file_attr / get_file_attr
+query_file 属性和内容摘要查询
+tool_call 自动记录 Context Path
+context_query
+context_rollback
+context_clear
+小配额下 FIFO 淘汰
 ```
 
-因此多个 Agent 可以独立进入 `WAITING -> RUNNABLE -> RUNNING` 的循环，而不互相串扰。
-
-## 12. user.ld 修复
-
-本项目修改了 `user/user.ld`，将用户 ELF 拆分为两个 LOAD 段：
-
-```ld
-PHDRS
-{
-  text PT_LOAD FLAGS(5);
-  data PT_LOAD FLAGS(6);
-}
-```
-
-含义：
-
-```text
-FLAGS(5) = R + X
-FLAGS(6) = R + W
-```
-
-`.text` 和 `.rodata` 进入只读可执行段：
-
-```ld
-.text : {
-  *(.text .text.*)
-} :text
-
-.rodata : {
-  ...
-} :text
-```
-
-`.data` 和 `.bss` 进入可写段，并且页对齐：
-
-```ld
-. = ALIGN(0x1000);
-
-.data : {
-  ...
-} :data
-
-.bss : {
-  ...
-} :data
-```
-
-修改原因：原始用户程序被链接成一个 `RWE` LOAD 段，导致地址 `0x0` 的代码页可写。`usertests` 中 `copyout` 测试会执行：
-
-```c
-read(fd, (void*)0, 8192);
-```
-
-正确行为是内核拒绝向代码页写入。修复后，`exec()` 会根据 ELF flags 为代码页去掉 `PTE_W`，从而通过该测试。
-
-## 13. 测试设计
-
-### 13.1 agenttest
-
-`user/agenttest.c` 是 Agent-OS 功能测试程序，覆盖主线功能。
-
-测试辅助函数：
-
-```c
-static int
-call_tool(const char *tool, const char *params, struct agent_tool_response *resp)
-{
-  struct agent_tool_request req;
-
-  memset(&req, 0, sizeof(req));
-  strcpy(req.tool, tool);
-  strcpy(req.params, params);
-  return tool_call(&req, resp);
-}
-```
-
-核心测试流程：
-
-```text
-1. 普通进程调用 tool_call，确认返回 NOT_AGENT
-2. 调用 agent_create，确认返回 Context 区地址
-3. 调用 agent_info，检查 type、heartbeat、quota、context_start、context_size
-4. 直接读取 Agent Context header，检查 magic
-5. tool_list 返回 query_file
-6. get_system_status 返回 agents 字段
-7. query_process type=agent 能查到当前 Agent
-8. missing_tool 返回 TOOL_NOT_FOUND
-9. 创建 agentbmem / agentplan / agentcfg 三个文件
-10. set_file_attr 设置 type / owner / tags
-11. get_file_attr 查询 owner
-12. query_file 使用 type+owner+tags+keyword 找到 agentbmem
-13. 连续 5 次 tool_call，检查 Context Path 自动记录
-14. context_query 复制上下文内容
-15. context_rollback(2) 回退到两个节点
-16. context_clear 清空上下文
-17. 小配额 Agent 连续 tool_call，检查 dropped_nodes 增加
-```
-
-成功输出：
+期望输出：
 
 ```text
 agenttest: all tests passed
 ```
 
-### 13.2 usertests
+### 12.2 `agentlooptest`
 
-`usertests` 是 xv6 原生回归测试。它验证新增 Agent-OS 模块没有破坏基础内核行为。
-
-当前已验证：
+`user/agentlooptest.c` 覆盖任务五：
 
 ```text
-ALL TESTS PASSED
+heartbeat_test:
+  设置心跳，agent_wait 被心跳唤醒
+
+message_only_test:
+  关闭心跳，只靠 send_message 事件唤醒
+
+worker_loop:
+  子 Agent 先等心跳，再等消息，最后 agent_wait(0, 0) 标记完成
+
+multi_agent_test:
+  两个 Worker Agent 并发等待和唤醒
 ```
 
-### 13.3 mmaptest
-
-因为项目基于 `mmap` 分支，所以还需要验证原始 mmap 实验仍然可用。
-
-当前已验证：
-
-```text
-mmaptest: all tests succeeded
-```
-
-### 13.4 agentlooptest
-
-`user/agentlooptest.c` 是任务五的专门测试程序。
-
-它覆盖四类场景：
-
-```text
-1. heartbeat_test
-   设置心跳 -> 调用 agent_wait -> 确认被心跳唤醒
-
-2. message_only_test
-   watch(message) -> stop heartbeat -> 子进程 send_message
-   -> 确认只靠消息事件唤醒
-
-3. worker_loop
-   先等一次心跳，再等一次消息，最后 agent_wait(0, 0)
-   -> 验证 Loop 的继续/完成状态切换
-
-4. multi_agent_test
-   两个 worker 同时运行
-   -> 验证多 Agent 并发稳定性
-```
-
-这四部分分别对应任务五的验收标准：
-
-```text
-心跳触发正确进入 Agent Loop
-无事件时真正休眠
-事件驱动唤醒有效
-多个 Agent 可同时运行且系统稳定
-```
-
-成功输出：
+期望输出：
 
 ```text
 agentlooptest: all tests passed
@@ -1205,6 +916,17 @@ agentfsbench: batch_ticks indexed=0 fullscan=0
 agentfsbench: all tests passed
 ```
 
+### 13.6 原有回归
+
+建议同时运行：
+
+```text
+usertests
+mmaptest
+```
+
+用于确认 Agent-OS 扩展没有破坏 xv6 原有行为和 mmap 实验。
+
 ## 14. 构建与运行
 
 构建：
@@ -1237,12 +959,13 @@ mmaptest
 Ctrl-A 然后按 X
 ```
 
-## 15. 当前实现的边界
+## 15. 当前实现边界
 
-当前实现已经覆盖基础任务和 AgentFS 查询扩展，但仍有一些边界：
+当前实现偏向教学操作系统中的可演示闭环，边界如下：
 
 ```text
 Context 区由 uvmalloc 追加到用户地址空间末尾，不是独立 VMA
+真实 inode 中持久化的是 attrs 和 summary，查询 posting/index 缓存仍是运行时内存结构
 内容摘要是前 64 字节子串匹配，不是 embedding 语义检索
 query_file 的索引策略使用“第一个属性条件 -> posting bucket -> 剩余条件过滤”，还不是多条件最优执行计划
 任务五当前只实现了消息事件，还没有扩展到文件修改等更多事件源
@@ -1251,4 +974,4 @@ send_message 仍是单消息槽，不是完整消息队列
 真实 LLM 演示还需要单独的 agent_loop 用户态程序或宿主机桥接脚本
 ```
 
-这些限制不影响当前实验要求的主线验收。后续可以继续扩展 `.agentmeta` 持久化、专用 VMA、目录递归扫描、多条件索引选择、多事件源、消息队列和真实 LLM 串口桥接。
+后续增强方向可以是：Agent Context 专用 VMA、`.agentmeta` 持久化、多条件索引选择、文件修改 watch、消息队列、Agent 优先级/配额调度、以及完整的 `agent_loop` 用户态桥接程序。
