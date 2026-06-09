@@ -21,8 +21,10 @@
 #define AGENT_EVENT_NONE (0)
 #define AGENT_EVENT_HEARTBEAT (1)
 #define AGENT_EVENT_MESSAGE (2)
+#define AGENT_EVENT_FILEMOD (4)
 
 #define AGENT_WATCH_MESSAGE AGENT_EVENT_MESSAGE
+#define AGENT_WATCH_FILEMOD AGENT_EVENT_FILEMOD
 
 #define AGENT_TOOL_NAME_MAX (32)
 #define AGENT_TOOL_PARAM_MAX (128)
@@ -38,6 +40,11 @@
 #define AGENT_TOOL_ERR_NOT_AGENT (-3)
 #define AGENT_TOOL_ERR_NO_SPACE (-4)
 
+#define AGENT_SCHED_PRIORITY_MIN (1)
+#define AGENT_SCHED_PRIORITY_MAX (8)
+#define AGENT_SCHED_QUOTA_MIN (1)
+#define AGENT_SCHED_QUOTA_MAX (8)
+
 struct proc;
 
 struct agent_info {
@@ -50,6 +57,9 @@ struct agent_info {
   uint64 context_path_len;
   uint64 context_node_count;
   uint64 dropped_nodes;
+  int sched_priority;
+  int sched_quota;
+  int sched_budget;
 };
 
 struct agent_tool_request {
@@ -88,6 +98,7 @@ struct agent_wait_event {
   uint32 reserved;
   uint64 tick;
   char message[AGENT_MESSAGE_MAX];
+  char file[AGENT_MESSAGE_MAX];
 };
 
 void agent_init_proc(struct proc *p);
@@ -106,7 +117,10 @@ int agent_proc_heartbeat_set(struct proc *p, int interval);
 int agent_proc_heartbeat_stop(struct proc *p);
 int agent_proc_watch(struct proc *p, int mask);
 int agent_proc_unwatch(struct proc *p, int mask);
+int agent_proc_watch_file(struct proc *p, uint64 upath);
+int agent_proc_sched_set(struct proc *p, int priority, int quota);
 int agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent);
 void agent_tick(uint64 now);
+void agent_notify_file_modified(uint dev, uint inum);
 
 #endif

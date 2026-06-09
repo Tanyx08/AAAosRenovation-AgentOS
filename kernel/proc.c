@@ -477,6 +477,29 @@ wait(uint64 addr)
   }
 }
 
+static int
+agent_sched_score(struct proc *p)
+{
+  if(p->agent_type == AGENT_TYPE_NORMAL)
+    return 1;
+  return p->agent_sched_priority + p->agent_sched_boost;
+}
+
+static void
+agent_sched_refill_budgets(void)
+{
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state != UNUSED &&
+       p->agent_type != AGENT_TYPE_NORMAL &&
+       p->agent_sched_quota > 0)
+      p->agent_sched_budget = p->agent_sched_quota;
+    release(&p->lock);
+  }
+}
+
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
 // Scheduler never returns.  It loops, doing:
@@ -488,7 +511,10 @@ void
 scheduler(void)
 {
   struct proc *p;
+  struct proc *best;
   struct cpu *c = mycpu();
+  int best_score;
+  int runnable_exhausted_agents;
 
   c->proc = 0;
   for(;;){
@@ -497,22 +523,49 @@ scheduler(void)
     // processes are waiting.
     intr_on();
 
+    best = 0;
+    best_score = -1;
+    runnable_exhausted_agents = 0;
+
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
+      if(p->state == RUNNABLE){
+        if(p->agent_type != AGENT_TYPE_NORMAL &&
+           p->agent_sched_quota > 0 &&
+           p->agent_sched_budget <= 0){
+          runnable_exhausted_agents = 1;
+          release(&p->lock);
+          continue;
+        }
+        if(best == 0 || agent_sched_score(p) > best_score){
+          if(best != 0)
+            release(&best->lock);
+          best = p;
+          best_score = agent_sched_score(p);
+          continue;
+        }
       }
       release(&p->lock);
     }
+
+    if(best == 0 && runnable_exhausted_agents){
+      agent_sched_refill_budgets();
+      continue;
+    }
+    if(best == 0)
+      continue;
+
+    best->state = RUNNING;
+    c->proc = best;
+    swtch(&c->context, &best->context);
+    c->proc = 0;
+    if(best->agent_type != AGENT_TYPE_NORMAL){
+      if(best->agent_sched_quota > 0 && best->agent_sched_budget > 0)
+        best->agent_sched_budget--;
+      if(best->agent_sched_boost > 0)
+        best->agent_sched_boost--;
+    }
+    release(&best->lock);
   }
 }
 

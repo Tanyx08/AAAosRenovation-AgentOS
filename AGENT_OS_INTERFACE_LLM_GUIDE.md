@@ -72,6 +72,8 @@ int context_clear(void);
 int agent_heartbeat_set(int interval);
 int agent_heartbeat_stop(void);
 int agent_watch(int mask);
+int agent_watch_file(const char *path);
+int agent_sched_set(int priority, int quota);
 int agent_wait(int continue_loop, void *event);
 int agent_unwatch(int mask);
 ```
@@ -429,11 +431,12 @@ agent_heartbeat_stop();
 
 ### 9.2 事件关注
 
-当前支持消息事件：
+当前支持消息事件和文件修改事件：
 
 ```c
 agent_watch(AGENT_WATCH_MESSAGE);
 agent_unwatch(AGENT_WATCH_MESSAGE);
+agent_watch_file("watchlog");
 ```
 
 ### 9.3 等待下一轮
@@ -450,6 +453,9 @@ if(reason & AGENT_EVENT_HEARTBEAT)
 
 if(reason & AGENT_EVENT_MESSAGE)
   printf("message: %s\n", event.message);
+
+if(reason & AGENT_EVENT_FILEMOD)
+  printf("file modified: %s\n", event.file);
 ```
 
 `agent_wait(1, &event)` 表示“本轮结束，继续下一轮”。如果当前没有 pending event，进程会进入睡眠状态，不忙等占 CPU。
@@ -462,7 +468,27 @@ agent_wait(0, 0);
 
 此时内核会将 `loop_state` 设置为 `AGENT_LOOP_DONE`，并清理心跳和事件关注。
 
-## 10. Agent 消息事件
+### 9.4 调度参数
+
+任务五扩展后，Agent 可以显式声明自己的调度优先级和每轮 CPU 配额：
+
+```c
+agent_sched_set(7, 6);
+```
+
+含义：
+
+```text
+priority:
+  调度优先级，范围 1..8，越大越容易先被调度
+
+quota:
+  每轮预算可消耗的调度片数量，范围 1..8
+```
+
+被心跳、消息或文件事件唤醒的 Agent 还会获得短时 boost，因此事件驱动任务通常能更快恢复执行。
+
+## 10. Agent 事件
 
 使用 `send_message` 工具向另一个 Agent 发送消息：
 
@@ -480,6 +506,19 @@ agent_wait(1, &event);
 ```
 
 就会被该消息唤醒，并通过 `event.message` 收到消息内容。
+
+文件修改事件的用法：
+
+```c
+int fd = open("watchlog", O_CREATE | O_RDWR);
+close(fd);
+
+agent_watch_file("watchlog");
+reason = agent_wait(1, &event);
+
+if(reason & AGENT_EVENT_FILEMOD)
+  printf("modified file: %s\n", event.file);
+```
 
 `user/agentlooptest.c` 展示了完整用法：
 
@@ -543,11 +582,17 @@ heartbeat_test:
 message_only_test:
   关闭心跳，只靠消息事件唤醒
 
+file_modify_event_test:
+  watch_file -> write -> 文件修改事件唤醒
+
 worker_loop:
   心跳 -> 消息 -> DONE 生命周期
 
 multi_agent_test:
   两个 Worker Agent 并发等待和唤醒
+
+scheduler_policy_test:
+  高优先级/高配额 Agent 比低优先级/低配额 Agent 获得更多 CPU
 ```
 
 这两个测试基本就是最好的用户态示例。新增应用时，建议优先参考 `user/agenttest.c` 的 `call_tool()`、`make_file()`、`set_attr()`，以及 `user/agentlooptest.c` 的 `send_message_to()`、`worker_loop()`。
@@ -787,7 +832,7 @@ xv6 Agent-OS 负责工具执行和上下文维护
 2. 展示 query_file 不需要完整路径，只需要属性和 keyword
 3. 展示 used_index / index_scanned / full_scanned，说明查询优化
 4. 展示 Context Path 记录多轮工具调用
-5. 运行 agentlooptest，证明心跳、消息事件和多 Agent Loop 可用
+5. 运行 agentlooptest，证明心跳、消息事件、文件修改事件和多 Agent Loop 可用
 6. 展示宿主机 LLM 输出 TOOL
 7. QEMU 返回 OBS
 8. LLM 基于 OBS 总结最终答案
@@ -801,7 +846,7 @@ Agent 通过结构化 syscall 与内核交互
 Agent Context 区支持用户态高速读取上下文
 内核维护上下文元信息、配额、安全检查和唤醒机制
 AgentFS 支持属性和摘要查询
-Agent Loop 可由心跳或消息事件驱动
+Agent Loop 可由心跳、消息和文件修改事件驱动
 真实 LLM 作为策略层运行在宿主机
 ```
 
@@ -821,7 +866,7 @@ xv6 内核环境很小，实现 JSON parser 成本高，也更容易引入边界
 
 ### Q: 多 Agent 有专门优先级调度吗？
 
-当前没有。系统仍使用 xv6 原有调度器，但 Agent 可以独立等待、独立被心跳或消息唤醒，不会在无事件时忙等。
+有。当前内核在 xv6 调度器之上加入了 Agent 的 `priority + quota + wake boost` 机制。高优先级/高配额 Agent 会拿到更多 CPU，但 quota 又能限制单个 Agent 长时间独占处理器。
 
 ### Q: 真实 LLM 一定要 OpenAI 吗？
 

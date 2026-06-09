@@ -12,9 +12,9 @@
 | 任务二：结构化交互接口 | 已完成 | `tool_call`/`tool_list` 已实现，内核提供 8 个工具，包含错误码和结构化响应。 |
 | 任务三：上下文路径管理 | 已完成 | Context Path 分层存储、自动追加、查询、回滚、清空、FIFO 淘汰均已实现。 |
 | 任务四：Agent 查询优化文件系统扩展 | 已完成主要要求 | 实现文件属性、内容摘要、属性哈希索引、结构化查询结果和扫描统计。 |
-| 任务五：Agent Loop 内核运行机制 | 已完成主要要求 | 实现心跳、消息事件、`agent_wait` 休眠/唤醒、Loop 生命周期和多 Agent 并发演示。 |
+| 任务五：Agent Loop 内核运行机制 | 已完成扩展版 | 实现心跳、消息事件、文件修改事件、`agent_wait` 休眠/唤醒、Loop 生命周期，以及带优先级/配额的多 Agent 调度。 |
 
-当前没有实现的增强项主要是：AgentFS 元数据持久化、复杂语义检索、文件修改事件源、Agent 优先级调度、消息队列和真实 LLM 常驻用户态循环程序。这些属于后续增强，不影响当前主线验收。
+当前没有实现的增强项主要是：AgentFS 复杂语义检索、多文件条件 watch、消息队列和真实 LLM 常驻用户态循环程序。这些属于后续增强，不影响当前主线验收。
 
 ## 2. 文件总览
 
@@ -372,6 +372,8 @@ context_clear()
 agent_heartbeat_set(interval)
 agent_heartbeat_stop()
 agent_watch(mask)
+agent_watch_file(path)
+agent_sched_set(priority, quota)
 agent_wait(continue_loop, event)
 agent_unwatch(mask)
 ```
@@ -392,6 +394,8 @@ agent_unwatch(mask)
 #define SYS_agent_watch 34
 #define SYS_agent_wait 35
 #define SYS_agent_unwatch 36
+#define SYS_agent_watch_file 37
+#define SYS_agent_sched_set 38
 ```
 
 用户态 stub 由 `user/usys.pl` 生成，函数声明在 `user/user.h`。
@@ -748,9 +752,11 @@ if(p->state == SLEEPING && p->chan == p)
   p->state = RUNNABLE;
 ```
 
-### 11.2 消息事件
+### 11.2 事件驱动触发
 
-当前事件驱动触发实现的是消息事件。用户态注册：
+当前实现了两类事件源：消息事件和文件修改事件。
+
+消息事件的注册方式：
 
 ```c
 agent_watch(AGENT_WATCH_MESSAGE);
@@ -770,6 +776,20 @@ if(target->watch_mask & AGENT_WATCH_MESSAGE){
 ```
 
 这样消息既是结构化工具调用，也是 Agent Loop 的事件源。
+
+文件修改事件使用专用 syscall 注册：
+
+```c
+agent_watch_file("watchlog");
+```
+
+内核在注册时会解析路径、定位真实 inode，并把 `dev + inum + path` 保存到 PCB。之后普通 `write()` 成功写入该 inode 时，`kernel/file.c` 会调用：
+
+```c
+agent_notify_file_modified(dev, inum);
+```
+
+该函数扫描进程表，找到关注该 inode 的 Agent，设置 `AGENT_EVENT_FILEMOD`，并在目标休眠于 `agent_wait()` 时立即唤醒。
 
 ### 11.3 `agent_wait()` 与生命周期
 
@@ -814,22 +834,61 @@ struct agent_wait_event {
   uint32 reserved;
   uint64 tick;
   char message[AGENT_MESSAGE_MAX];
+  char file[AGENT_MESSAGE_MAX];
 };
 ```
 
-### 11.4 多 Agent 协调
+因此用户态可以通过：
 
-当前没有新增独立优先级调度器，仍使用 xv6 原有调度器。但每个 Agent 都拥有独立的：
-
-```text
-heartbeat_deadline
-watch_mask
-pending_events
-agent_message
-loop_state
+```c
+if(reason & AGENT_EVENT_FILEMOD)
+  printf("file modified: %s\n", event.file);
 ```
 
-心跳和消息只唤醒目标 Agent；无事件时 Agent 进入 `SLEEPING`，不会忙等占用 CPU。因此多个 Agent 可以同时等待并由各自事件唤醒。
+区分消息事件与文件修改事件。
+
+### 11.4 多 Agent 协调与优先级/配额调度
+
+当前版本在 xv6 原始调度器基础上加入了一层 Agent-aware 调度策略。每个 Agent 新增如下调度字段：
+
+```text
+agent_sched_priority   静态优先级，范围 1..8
+agent_sched_quota      每轮预算可运行的调度片数
+agent_sched_budget     当前轮剩余预算
+agent_sched_boost      事件唤醒后的临时加权
+```
+
+默认策略：
+
+```text
+PRIMARY Agent: priority=5 quota=4
+WORKER  Agent: priority=3 quota=2
+普通进程:        走默认分支，不受 Agent quota 限制
+```
+
+用户态可动态调整：
+
+```c
+agent_sched_set(7, 6);
+```
+
+调度器的核心策略是：
+
+```text
+1. 在 RUNNABLE 进程中优先选择 score 更高的 Agent
+2. score = agent_sched_priority + agent_sched_boost
+3. Agent 每运行一个调度片，agent_sched_budget--
+4. 当所有 runnable Agent 的 budget 都耗尽时，统一 refill 到各自 quota
+5. 被心跳、消息或文件事件唤醒的 Agent 会获得短时 boost，保证事件响应优先
+```
+
+这样可以同时满足三件事：
+
+```text
+事件驱动 Agent 被及时响应
+高优先级 Agent 比低优先级 Agent 更容易获得 CPU
+quota 防止单个高优先级 Agent 长时间垄断处理器
+```
 
 ## 12. 测试程序
 
@@ -876,6 +935,12 @@ worker_loop:
 
 multi_agent_test:
   两个 Worker Agent 并发等待和唤醒
+
+file_modify_event_test:
+  watch_file -> 子进程 write -> Agent 被文件修改事件唤醒
+
+scheduler_policy_test:
+  高优先级/高配额 Agent 与低优先级/低配额 Agent 并发运行，对比 CPU 获得量
 ```
 
 期望输出：
@@ -968,10 +1033,10 @@ Context 区由 uvmalloc 追加到用户地址空间末尾，不是独立 VMA
 真实 inode 中持久化的是 attrs 和 summary，查询 posting/index 缓存仍是运行时内存结构
 内容摘要是前 64 字节子串匹配，不是 embedding 语义检索
 query_file 的索引策略使用“第一个属性条件 -> posting bucket -> 剩余条件过滤”，还不是多条件最优执行计划
-任务五当前只实现了消息事件，还没有扩展到文件修改等更多事件源
+文件事件当前只支持单文件 inode watch，还没有扩展到目录递归或通配条件
 send_message 仍是单消息槽，不是完整消息队列
-多 Agent 运行仍沿用 xv6 原始调度器，没有单独的 Agent 优先级策略
+调度器当前采用单机内核中的简单优先级+预算轮转，还不是多核下的复杂全局公平调度
 真实 LLM 演示还需要单独的 agent_loop 用户态程序或宿主机桥接脚本
 ```
 
-后续增强方向可以是：Agent Context 专用 VMA、`.agentmeta` 持久化、多条件索引选择、文件修改 watch、消息队列、Agent 优先级/配额调度、以及完整的 `agent_loop` 用户态桥接程序。
+后续增强方向可以是：Agent Context 专用 VMA、`.agentmeta` 持久化、多条件索引选择、多文件/目录 watch、消息队列、更细粒度的 Agent 调度统计，以及完整的 `agent_loop` 用户态桥接程序。

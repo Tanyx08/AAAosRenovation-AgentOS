@@ -51,3 +51,5 @@ entry("agent_heartbeat_stop");
 entry("agent_watch");
 entry("agent_wait");
 entry("agent_unwatch");
+entry("agent_watch_file");
+entry("agent_sched_set");

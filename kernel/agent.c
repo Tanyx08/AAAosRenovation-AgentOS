@@ -52,6 +52,26 @@ static struct agent_file_meta file_meta[AGENT_FILE_META_MAX];
 static struct agent_file_posting file_postings[AGENT_FILE_POSTING_MAX];
 static int file_index[AGENT_FILE_INDEX_BUCKETS];
 
+static int
+agent_default_sched_priority(int type)
+{
+  if(type == AGENT_TYPE_PRIMARY)
+    return 5;
+  if(type == AGENT_TYPE_WORKER)
+    return 3;
+  return AGENT_SCHED_PRIORITY_MIN;
+}
+
+static int
+agent_default_sched_quota(int type)
+{
+  if(type == AGENT_TYPE_PRIMARY)
+    return 4;
+  if(type == AGENT_TYPE_WORKER)
+    return 2;
+  return 0;
+}
+
 static void
 agent_file_init(void)
 {
@@ -562,6 +582,13 @@ agent_init_proc(struct proc *p)
   p->pending_events = 0;
   p->last_wakeup_reason = AGENT_EVENT_NONE;
   memset(p->agent_message, 0, sizeof(p->agent_message));
+  p->agent_watch_dev = 0;
+  p->agent_watch_inum = 0;
+  memset(p->agent_watch_path, 0, sizeof(p->agent_watch_path));
+  p->agent_sched_priority = AGENT_SCHED_PRIORITY_MIN;
+  p->agent_sched_quota = 0;
+  p->agent_sched_budget = 0;
+  p->agent_sched_boost = 0;
 }
 
 void
@@ -586,6 +613,14 @@ agent_after_fork(struct proc *dst, struct proc *src)
   dst->pending_events = src->pending_events;
   dst->last_wakeup_reason = src->last_wakeup_reason;
   memmove(dst->agent_message, src->agent_message, sizeof(dst->agent_message));
+  dst->agent_watch_dev = src->agent_watch_dev;
+  dst->agent_watch_inum = src->agent_watch_inum;
+  memmove(dst->agent_watch_path, src->agent_watch_path,
+          sizeof(dst->agent_watch_path));
+  dst->agent_sched_priority = src->agent_sched_priority;
+  dst->agent_sched_quota = src->agent_sched_quota;
+  dst->agent_sched_budget = src->agent_sched_budget;
+  dst->agent_sched_boost = src->agent_sched_boost;
 }
 
 int
@@ -666,6 +701,13 @@ agent_mark_current(int type, int heartbeat_interval, uint64 resource_quota)
   p->pending_events = 0;
   p->last_wakeup_reason = AGENT_EVENT_NONE;
   p->agent_message[0] = 0;
+  p->agent_watch_dev = 0;
+  p->agent_watch_inum = 0;
+  p->agent_watch_path[0] = 0;
+  p->agent_sched_priority = agent_default_sched_priority(type);
+  p->agent_sched_quota = agent_default_sched_quota(type);
+  p->agent_sched_budget = p->agent_sched_quota;
+  p->agent_sched_boost = 0;
   agent_context_clear(p);
   return p->context_region_start;
 }
@@ -682,6 +724,9 @@ agent_get_info(struct proc *p, struct agent_info *info)
   info->context_path_len = p->context_path_len;
   info->context_node_count = p->context_node_count;
   info->dropped_nodes = p->context_dropped_nodes;
+  info->sched_priority = p->agent_sched_priority;
+  info->sched_quota = p->agent_sched_quota;
+  info->sched_budget = p->agent_sched_budget;
   return 0;
 }
 
@@ -843,6 +888,18 @@ tool_query_process(struct agent_tool_request *req,
 }
 
 static void
+agent_signal_event_locked(struct proc *p, int event, uint64 now)
+{
+  p->pending_events |= event;
+  p->last_wakeup_reason = p->pending_events;
+  p->wakeup_tick = now;
+  if(p->agent_sched_boost < 2)
+    p->agent_sched_boost = 2;
+  if(p->state == SLEEPING && p->chan == p)
+    p->state = RUNNABLE;
+}
+
+static void
 tool_send_message(struct agent_tool_request *req,
                   struct agent_tool_response *resp)
 {
@@ -868,11 +925,7 @@ tool_send_message(struct agent_tool_request *req,
   acquire(&target->lock);
   safestrcpy(target->agent_message, message, sizeof(target->agent_message));
   if(target->watch_mask & AGENT_WATCH_MESSAGE){
-    target->pending_events |= AGENT_EVENT_MESSAGE;
-    target->last_wakeup_reason = AGENT_EVENT_MESSAGE;
-    target->wakeup_tick = agent_now_safe();
-    if(target->state == SLEEPING && target->chan == target)
-      target->state = RUNNABLE;
+    agent_signal_event_locked(target, AGENT_EVENT_MESSAGE, agent_now_safe());
   }
   release(&target->lock);
   tool_resp_set(resp, AGENT_TOOL_OK, "message delivered");
@@ -1217,7 +1270,7 @@ agent_proc_watch(struct proc *p, int mask)
 {
   if(p->agent_type == AGENT_TYPE_NORMAL)
     return AGENT_TOOL_ERR_NOT_AGENT;
-  if(mask & ~AGENT_WATCH_MESSAGE)
+  if(mask & ~(AGENT_WATCH_MESSAGE | AGENT_WATCH_FILEMOD))
     return -1;
 
   acquire(&p->lock);
@@ -1241,6 +1294,74 @@ agent_proc_unwatch(struct proc *p, int mask)
     p->watch_mask &= ~mask;
   if(!(p->watch_mask & AGENT_WATCH_MESSAGE))
     p->pending_events &= ~AGENT_EVENT_MESSAGE;
+  if(!(p->watch_mask & AGENT_WATCH_FILEMOD)){
+    p->pending_events &= ~AGENT_EVENT_FILEMOD;
+    p->agent_watch_dev = 0;
+    p->agent_watch_inum = 0;
+    p->agent_watch_path[0] = 0;
+  }
+  release(&p->lock);
+  return 0;
+}
+
+int
+agent_proc_watch_file(struct proc *p, uint64 upath)
+{
+  char path[AGENT_MESSAGE_MAX];
+  struct inode *ip;
+  uint dev;
+  uint inum;
+
+  if(p->agent_type == AGENT_TYPE_NORMAL)
+    return AGENT_TOOL_ERR_NOT_AGENT;
+  if(copyinstr(p->pagetable, path, upath, sizeof(path)) < 0)
+    return -1;
+
+  begin_op();
+  ip = namei(path);
+  if(ip == 0){
+    end_op();
+    return -1;
+  }
+  ilock(ip);
+  if(ip->type != T_FILE){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+  dev = ip->dev;
+  inum = ip->inum;
+  iunlockput(ip);
+  end_op();
+
+  acquire(&p->lock);
+  p->watch_mask |= AGENT_WATCH_FILEMOD;
+  p->agent_watch_dev = dev;
+  p->agent_watch_inum = inum;
+  safestrcpy(p->agent_watch_path, path, sizeof(p->agent_watch_path));
+  if(p->loop_state != AGENT_LOOP_DONE)
+    p->loop_state = AGENT_LOOP_READY;
+  release(&p->lock);
+  return 0;
+}
+
+int
+agent_proc_sched_set(struct proc *p, int priority, int quota)
+{
+  if(p->agent_type == AGENT_TYPE_NORMAL)
+    return AGENT_TOOL_ERR_NOT_AGENT;
+  if(priority < AGENT_SCHED_PRIORITY_MIN || priority > AGENT_SCHED_PRIORITY_MAX)
+    return -1;
+  if(quota < AGENT_SCHED_QUOTA_MIN || quota > AGENT_SCHED_QUOTA_MAX)
+    return -1;
+
+  acquire(&p->lock);
+  p->agent_sched_priority = priority;
+  p->agent_sched_quota = quota;
+  if(p->agent_sched_budget > quota)
+    p->agent_sched_budget = quota;
+  if(p->agent_sched_budget <= 0)
+    p->agent_sched_budget = quota;
   release(&p->lock);
   return 0;
 }
@@ -1263,6 +1384,10 @@ agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent)
     p->pending_events = 0;
     p->last_wakeup_reason = AGENT_EVENT_NONE;
     p->agent_message[0] = 0;
+    p->agent_watch_dev = 0;
+    p->agent_watch_inum = 0;
+    p->agent_watch_path[0] = 0;
+    p->agent_sched_boost = 0;
     release(&p->lock);
     return 0;
   }
@@ -1277,6 +1402,8 @@ agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent)
       event.tick = p->wakeup_tick ? p->wakeup_tick : agent_now_safe();
       if(reason & AGENT_EVENT_MESSAGE)
         safestrcpy(event.message, p->agent_message, sizeof(event.message));
+      if(reason & AGENT_EVENT_FILEMOD)
+        safestrcpy(event.file, p->agent_watch_path, sizeof(event.file));
       p->pending_events = 0;
       p->last_wakeup_reason = reason;
       p->agent_message[0] = 0;
@@ -1312,12 +1439,27 @@ agent_tick(uint64 now)
        p->heartbeat_interval > 0 &&
        p->heartbeat_deadline > 0 &&
        now >= p->heartbeat_deadline){
-      p->pending_events |= AGENT_EVENT_HEARTBEAT;
-      p->last_wakeup_reason = AGENT_EVENT_HEARTBEAT;
-      p->wakeup_tick = now;
+      agent_signal_event_locked(p, AGENT_EVENT_HEARTBEAT, now);
       p->heartbeat_deadline = now + p->heartbeat_interval;
-      if(p->state == SLEEPING && p->chan == p)
-        p->state = RUNNABLE;
+    }
+    release(&p->lock);
+  }
+}
+
+void
+agent_notify_file_modified(uint dev, uint inum)
+{
+  struct proc *p;
+  uint64 now = agent_now_safe();
+
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state != UNUSED &&
+       p->agent_type != AGENT_TYPE_NORMAL &&
+       (p->watch_mask & AGENT_WATCH_FILEMOD) &&
+       p->agent_watch_inum == inum &&
+       p->agent_watch_dev == dev){
+      agent_signal_event_locked(p, AGENT_EVENT_FILEMOD, now);
     }
     release(&p->lock);
   }

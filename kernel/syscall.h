@@ -35,3 +35,5 @@
 #define SYS_agent_watch 34
 #define SYS_agent_wait 35
 #define SYS_agent_unwatch 36
+#define SYS_agent_watch_file 37
+#define SYS_agent_sched_set 38

@@ -151,3 +151,23 @@ sys_agent_unwatch(void)
   argint(0, &mask);
   return agent_proc_unwatch(myproc(), mask);
 }
+
+uint64
+sys_agent_watch_file(void)
+{
+  uint64 upath;
+
+  argaddr(0, &upath);
+  return agent_proc_watch_file(myproc(), upath);
+}
+
+uint64
+sys_agent_sched_set(void)
+{
+  int priority;
+  int quota;
+
+  argint(0, &priority);
+  argint(1, &quota);
+  return agent_proc_sched_set(myproc(), priority, quota);
+}

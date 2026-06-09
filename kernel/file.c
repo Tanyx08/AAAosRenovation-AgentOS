@@ -146,6 +146,9 @@ filewrite(struct file *f, uint64 addr, int n)
       return -1;
     ret = devsw[f->major].write(1, addr, n);
   } else if(f->type == FD_INODE){
+    uint dev = f->ip->dev;
+    uint inum = f->ip->inum;
+
     // write a few blocks at a time to avoid exceeding
     // the maximum log transaction size, including
     // i-node, indirect block, allocation blocks,
@@ -173,10 +176,11 @@ filewrite(struct file *f, uint64 addr, int n)
       i += r;
     }
     ret = (i == n ? n : -1);
+    if(ret > 0)
+      agent_notify_file_modified(dev, inum);
   } else {
     panic("filewrite");
   }
 
   return ret;
 }
-
