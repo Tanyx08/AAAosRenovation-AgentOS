@@ -415,6 +415,7 @@ exit(int status)
 
   // Parent might be sleeping in wait().
   wakeup(p->parent);
+  agent_proc_exit(p);
   
   acquire(&p->lock);
 
@@ -488,7 +489,11 @@ void
 scheduler(void)
 {
   struct proc *p;
+  struct proc *best;
   struct cpu *c = mycpu();
+  uint64 now;
+  int score;
+  int bestscore;
 
   c->proc = 0;
   for(;;){
@@ -497,21 +502,40 @@ scheduler(void)
     // processes are waiting.
     intr_on();
 
+    acquire(&tickslock);
+    now = ticks;
+    release(&tickslock);
+
+    best = 0;
+    bestscore = -1;
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
+        score = agent_schedule_score(p, now);
+        if(score > bestscore){
+          if(best != 0)
+            release(&best->lock);
+          bestscore = score;
+          best = p;
+          continue;
+        }
       }
       release(&p->lock);
+    }
+
+    if(best != 0){
+      // Switch to chosen process.  It is the process's job
+      // to release its lock and then reacquire it
+      // before jumping back to us.
+      best->state = RUNNING;
+      best->runnable_since = 0;
+      c->proc = best;
+      swtch(&c->context, &best->context);
+
+      // Process is done running for now.
+      // It should have changed its p->state before coming back.
+      c->proc = 0;
+      release(&best->lock);
     }
   }
 }

@@ -50,6 +50,10 @@ int agent_heartbeat_stop(void);
 int agent_watch(int);
 int agent_wait(int, void*);
 int agent_unwatch(int);
+int agent_priority_set(int);
+int tool_register(const char*, int);
+int tool_recv(void*);
+int tool_reply(int, const char*, int);
 
 // ulib.c
 int stat(const char*, struct stat*);

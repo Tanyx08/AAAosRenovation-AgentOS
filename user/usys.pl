@@ -51,3 +51,7 @@ entry("agent_heartbeat_stop");
 entry("agent_watch");
 entry("agent_wait");
 entry("agent_unwatch");
+entry("agent_priority_set");
+entry("tool_register");
+entry("tool_recv");
+entry("tool_reply");

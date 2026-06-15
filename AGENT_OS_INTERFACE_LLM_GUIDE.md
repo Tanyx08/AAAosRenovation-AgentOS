@@ -1,6 +1,6 @@
 # Agent-OS 使用手册与 LLM 演示指南
 
-本文档面向使用者和演示者，说明如何构建系统、运行测试、调用 Agent-OS 接口，以及如何把真实 LLM 作为策略层接入 xv6/QEMU。
+本文档面向使用者和演示者，说明如何构建系统、运行测试、调用 Agent-OS 接口，以及如何把真实 LLM 作为策略层接入 xv6/QEMU。本文只讲“怎么用、怎么演示、怎么讲”，不重复展开内核实现细节。
 
 内核实现细节请看 `AGENT_OS_IMPLEMENTATION.md`。
 
@@ -31,6 +31,7 @@ make qemu
 ```text
 agenttest
 agentlooptest
+agentinnovationtest
 ```
 
 期望结果：
@@ -38,6 +39,7 @@ agentlooptest
 ```text
 agenttest: all tests passed
 agentlooptest: all tests passed
+agentinnovationtest: all tests passed
 ```
 
 建议再跑原有回归：
@@ -74,6 +76,11 @@ int agent_heartbeat_stop(void);
 int agent_watch(int mask);
 int agent_wait(int continue_loop, void *event);
 int agent_unwatch(int mask);
+int agent_priority_set(int priority);
+
+int tool_register(const char *name, int flags);
+int tool_recv(void *request);
+int tool_reply(int request_id, const char *result, int status);
 ```
 
 结构体和常量位于 `kernel/agent.h`。用户程序建议这样包含：
@@ -413,7 +420,7 @@ printf("dropped_nodes=%d\n", info.dropped_nodes);
 
 ## 9. Agent Loop 接口
 
-任务五相关接口用于让 Agent 在无事可做时休眠，并被心跳或事件唤醒。
+Agent Loop 接口用于让 Agent 在无事可做时休眠，并被心跳或事件唤醒。
 
 ### 9.1 心跳
 
@@ -429,10 +436,11 @@ agent_heartbeat_stop();
 
 ### 9.2 事件关注
 
-当前支持消息事件：
+当前支持消息事件和文件修改事件：
 
 ```c
 agent_watch(AGENT_WATCH_MESSAGE);
+agent_watch(AGENT_WATCH_FILEMOD);
 agent_unwatch(AGENT_WATCH_MESSAGE);
 ```
 
@@ -450,6 +458,9 @@ if(reason & AGENT_EVENT_HEARTBEAT)
 
 if(reason & AGENT_EVENT_MESSAGE)
   printf("message: %s\n", event.message);
+
+if(reason & AGENT_EVENT_FILEMOD)
+  printf("agentfs file metadata changed\n");
 ```
 
 `agent_wait(1, &event)` 表示“本轮结束，继续下一轮”。如果当前没有 pending event，进程会进入睡眠状态，不忙等占 CPU。
@@ -496,6 +507,49 @@ Worker Agent:
   检查 event.message
   agent_wait(0, 0)
 ```
+
+### 10.1 文件修改事件和事件感知调度
+
+`set_file_attr` 和 `del_file_attr` 会触发 `AGENT_EVENT_FILEMOD`。如果多个 Agent 同时变为 `RUNNABLE`，内核调度分数为：
+
+```text
+score = agent_priority * 10 + event_weight(pending_events) + aging_bonus
+```
+
+事件权重：
+
+```text
+MESSAGE > FILEMOD > HEARTBEAT
+30        20        10
+```
+
+因此同优先级下，紧急消息会先于文件修改和心跳被处理。`agent_priority_set(5)` 可设置基础优先级，默认值为 5。
+
+### 10.2 动态工具注册
+
+动态工具类似 LLM skill：能力由用户态服务按需注册，调用方仍然使用统一的 `tool_call()`。
+
+服务 Agent：
+
+```c
+struct agent_dynamic_tool_request req;
+
+agent_create(AGENT_TYPE_WORKER, 0, 256);
+tool_register("summarize_log", AGENT_TOOL_FLAG_PUBLIC);
+tool_recv(&req);
+tool_reply(req.request_id,
+           "{status=ok,summary=agentlog compressed}",
+           AGENT_TOOL_OK);
+```
+
+调用方 Agent：
+
+```c
+call_tool("summarize_log", "file=agentlog", &resp);
+printf("%s\n", resp.result);
+```
+
+默认动态工具只允许同 Agent group 调用；注册时设置 `AGENT_TOOL_FLAG_PUBLIC` 后可跨组调用。
 
 ## 11. 现有测试程序
 
@@ -550,7 +604,34 @@ multi_agent_test:
   两个 Worker Agent 并发等待和唤醒
 ```
 
-这两个测试基本就是最好的用户态示例。新增应用时，建议优先参考 `user/agenttest.c` 的 `call_tool()`、`make_file()`、`set_attr()`，以及 `user/agentlooptest.c` 的 `send_message_to()`、`worker_loop()`。
+### 11.3 `agentinnovationtest`
+
+运行：
+
+```text
+agentinnovationtest
+```
+
+覆盖内容：
+
+```text
+跨 Agent query_file 共享缓存:
+  cache_hit=0 -> cache_hit=1，并验证命中后 fs_scanned=0
+
+事件感知调度:
+  MESSAGE、FILEMOD、HEARTBEAT 同时 pending 时按 M -> F -> H 运行
+
+动态工具注册:
+  summarize_log 工具服务注册、tool_recv 接单、tool_reply 返回结果
+```
+
+期望结果：
+
+```text
+agentinnovationtest: all tests passed
+```
+
+这三个测试基本就是最好的用户态示例。新增应用时，建议优先参考 `user/agenttest.c` 的 `call_tool()`、`make_file()`、`set_attr()`，`user/agentlooptest.c` 的 `send_message_to()`、`worker_loop()`，以及 `user/agentinnovationtest.c` 的动态工具服务写法。
 
 ## 12. LLM 演示架构
 
@@ -786,11 +867,12 @@ xv6 Agent-OS 负责工具执行和上下文维护
 1. 运行 agenttest，证明 Agent 进程、Tool Call、Context Path、AgentFS 可用
 2. 展示 query_file 不需要完整路径，只需要属性和 keyword
 3. 展示 used_index / index_scanned / full_scanned，说明查询优化
-4. 展示 Context Path 记录多轮工具调用
-5. 运行 agentlooptest，证明心跳、消息事件和多 Agent Loop 可用
-6. 展示宿主机 LLM 输出 TOOL
-7. QEMU 返回 OBS
-8. LLM 基于 OBS 总结最终答案
+4. 运行 agentinnovationtest，展示共享缓存、事件感知调度和动态工具注册
+5. 展示 Context Path 记录多轮工具调用
+6. 运行 agentlooptest，证明心跳、消息事件和多 Agent Loop 可用
+7. 展示宿主机 LLM 输出 TOOL
+8. QEMU 返回 OBS
+9. LLM 基于 OBS 总结最终答案
 ```
 
 讲解重点：
@@ -801,7 +883,9 @@ Agent 通过结构化 syscall 与内核交互
 Agent Context 区支持用户态高速读取上下文
 内核维护上下文元信息、配额、安全检查和唤醒机制
 AgentFS 支持属性和摘要查询
-Agent Loop 可由心跳或消息事件驱动
+共享查询缓存避免多个 Agent 重复扫描
+Agent Loop 可由心跳、消息或文件修改事件驱动
+动态工具注册让用户态服务像 skill 一样扩展工具能力
 真实 LLM 作为策略层运行在宿主机
 ```
 
@@ -821,7 +905,7 @@ xv6 内核环境很小，实现 JSON parser 成本高，也更容易引入边界
 
 ### Q: 多 Agent 有专门优先级调度吗？
 
-当前没有。系统仍使用 xv6 原有调度器，但 Agent 可以独立等待、独立被心跳或消息唤醒，不会在无事件时忙等。
+有。当前调度器会计算 `agent_priority * 10 + event_weight + aging_bonus`，同优先级下 MESSAGE 优先于 FILEMOD，FILEMOD 优先于 HEARTBEAT。普通进程仍有默认分和 aging，避免长期饥饿。
 
 ### Q: 真实 LLM 一定要 OpenAI 吗？
 
@@ -829,4 +913,4 @@ xv6 内核环境很小，实现 JSON parser 成本高，也更容易引入边界
 
 ### Q: 没有 `agent_loop` 时怎么演示？
 
-先用 `agenttest` 和 `agentlooptest` 展示内核功能；如果要做真实 LLM 闭环，再补一个很薄的 `agent_loop` 用户态桥接程序。
+先用 `agenttest`、`agentlooptest` 和 `agentinnovationtest` 展示内核功能；如果要做真实 LLM 闭环，再补一个很薄的 `agent_loop` 用户态桥接程序。

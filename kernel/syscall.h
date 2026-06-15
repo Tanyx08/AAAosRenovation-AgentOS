@@ -35,3 +35,7 @@
 #define SYS_agent_watch 34
 #define SYS_agent_wait 35
 #define SYS_agent_unwatch 36
+#define SYS_agent_priority_set 37
+#define SYS_tool_register 38
+#define SYS_tool_recv 39
+#define SYS_tool_reply 40

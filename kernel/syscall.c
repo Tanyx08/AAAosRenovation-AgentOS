@@ -116,6 +116,10 @@ extern uint64 sys_agent_heartbeat_stop(void);
 extern uint64 sys_agent_watch(void);
 extern uint64 sys_agent_wait(void);
 extern uint64 sys_agent_unwatch(void);
+extern uint64 sys_agent_priority_set(void);
+extern uint64 sys_tool_register(void);
+extern uint64 sys_tool_recv(void);
+extern uint64 sys_tool_reply(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -156,6 +160,10 @@ static uint64 (*syscalls[])(void) = {
 [SYS_agent_watch] sys_agent_watch,
 [SYS_agent_wait] sys_agent_wait,
 [SYS_agent_unwatch] sys_agent_unwatch,
+[SYS_agent_priority_set] sys_agent_priority_set,
+[SYS_tool_register] sys_tool_register,
+[SYS_tool_recv] sys_tool_recv,
+[SYS_tool_reply] sys_tool_reply,
 };
 
 void

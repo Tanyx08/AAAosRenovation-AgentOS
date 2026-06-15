@@ -135,10 +135,13 @@ struct proc {
   uint64 context_dropped_nodes;
   uint64 heartbeat_deadline;
   uint64 wakeup_tick;
+  uint64 runnable_since;
   uint16 context_offsets[AGENT_CONTEXT_MAX_NODES];
   uint16 context_lengths[AGENT_CONTEXT_MAX_NODES];
   int watch_mask;
   int pending_events;
   int last_wakeup_reason;
+  int agent_priority;
+  int agent_group;
   char agent_message[AGENT_MESSAGE_MAX];
 };

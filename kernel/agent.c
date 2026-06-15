@@ -19,6 +19,11 @@
 #define AGENT_FILE_INDEX_BUCKETS (17)
 #define AGENT_FILE_RESULT_MAX (3)
 #define AGENT_FILE_QUERY_COND_MAX (6)
+#define AGENT_SHARED_QUERY_CACHE_MAX (8)
+#define AGENT_DEFAULT_PRIORITY (5)
+#define AGENT_MAX_PRIORITY (10)
+#define AGENT_AGING_DIVISOR (5)
+#define AGENT_AGING_MAX (20)
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX2(a, b) ((a) > (b) ? (a) : (b))
@@ -45,10 +50,62 @@ struct agent_file_query_cond {
   char value[AGENT_FILE_ATTR_VALUE_MAX];
 };
 
+struct shared_query_cache {
+  int used;
+  char query[AGENT_TOOL_PARAM_MAX];
+  char result[AGENT_TOOL_RESULT_MAX];
+  int owner_pid;
+  int owner_group;
+  int refcnt;
+  uint64 version;
+};
+
+struct agent_dynamic_tool {
+  int used;
+  char name[AGENT_TOOL_NAME_MAX];
+  int owner_pid;
+  int owner_group;
+  int flags;
+};
+
+struct agent_dynamic_request_slot {
+  int used;
+  int delivered;
+  int replied;
+  int id;
+  int caller_pid;
+  int caller_group;
+  int service_pid;
+  int status;
+  char tool[AGENT_TOOL_NAME_MAX];
+  char params[AGENT_TOOL_PARAM_MAX];
+  char result[AGENT_TOOL_RESULT_MAX];
+};
+
 static struct spinlock agent_file_lock;
 static int agent_file_ready;
 static struct agent_file_meta file_meta[AGENT_FILE_META_MAX];
 static int file_index[AGENT_FILE_INDEX_BUCKETS];
+static struct spinlock agent_runtime_lock;
+static int agent_runtime_ready;
+static uint64 agent_file_version = 1;
+static int agent_next_request_id = 1;
+static struct shared_query_cache shared_query_cache[AGENT_SHARED_QUERY_CACHE_MAX];
+static struct agent_dynamic_tool dynamic_tools[AGENT_DYNAMIC_TOOL_MAX];
+static struct agent_dynamic_request_slot dynamic_requests[AGENT_DYNAMIC_REQUEST_MAX];
+
+static void tool_resp_set(struct agent_tool_response *resp, int status,
+                          const char *result);
+static uint64 agent_now_safe(void);
+
+static void
+agent_runtime_init(void)
+{
+  if(agent_runtime_ready)
+    return;
+  initlock(&agent_runtime_lock, "agent_runtime");
+  agent_runtime_ready = 1;
+}
 
 static void
 agent_file_init(void)
@@ -158,6 +215,26 @@ parse_uint_param(const char *params, const char *key, uint64 *value)
   }
   *value = ret;
   return 0;
+}
+
+static int
+tool_is_builtin(const char *name)
+{
+  return streq(name, "query_process") ||
+         streq(name, "get_system_status") ||
+         streq(name, "send_message") ||
+         streq(name, "read_context") ||
+         streq(name, "set_file_attr") ||
+         streq(name, "get_file_attr") ||
+         streq(name, "del_file_attr") ||
+         streq(name, "query_file");
+}
+
+static int
+agent_same_group_or_public(struct proc *p, int owner_group, int flags)
+{
+  return (flags & AGENT_TOOL_FLAG_PUBLIC) ||
+         (p->agent_group != 0 && p->agent_group == owner_group);
 }
 
 static uint
@@ -298,6 +375,8 @@ file_query_parse(const char *params, struct agent_file_query_cond *conds,
     value[vn] = 0;
     if(streq(key, "keyword")){
       safestrcpy(keyword, value, keyword_sz);
+    } else if(streq(key, "public")){
+      ;
     } else if(*cond_count < AGENT_FILE_QUERY_COND_MAX){
       safestrcpy(conds[*cond_count].key, key, sizeof(conds[*cond_count].key));
       safestrcpy(conds[*cond_count].value, value,
@@ -340,6 +419,139 @@ append_file_result(char **ptr, int *left, struct agent_file_meta *meta)
   buf_puts(ptr, left, ",summary=");
   buf_puts(ptr, left, meta->summary);
   buf_putc(ptr, left, '}');
+}
+
+static int
+query_allows_public_share(const char *params)
+{
+  char value[AGENT_FILE_ATTR_VALUE_MAX];
+
+  if(param_value(params, "public", value, sizeof(value)) == 0 &&
+     streq(value, "true"))
+    return 1;
+  if(param_value(params, "owner", value, sizeof(value)) == 0 &&
+     streq(value, "system"))
+    return 1;
+  return 0;
+}
+
+static int
+cache_access_allowed(struct proc *p, struct shared_query_cache *entry)
+{
+  if(query_allows_public_share(entry->query))
+    return 1;
+  return p->agent_group != 0 && p->agent_group == entry->owner_group;
+}
+
+static void
+query_result_with_cache(char *dst, int dstsz, const char *base, int hit,
+                        int owner_pid, int refcnt, uint64 version,
+                        int fs_scanned)
+{
+  char *ptr = dst;
+  int left = dstsz;
+  int n = strlen(base);
+
+  memset(dst, 0, dstsz);
+  if(n > 0 && base[n - 1] == '}')
+    n--;
+  for(int i = 0; i < n; i++)
+    buf_putc(&ptr, &left, base[i]);
+  buf_puts(&ptr, &left, ",cache_hit=");
+  buf_putu(&ptr, &left, hit);
+  buf_puts(&ptr, &left, ",cache_owner=");
+  buf_putu(&ptr, &left, owner_pid);
+  buf_puts(&ptr, &left, ",cache_refcnt=");
+  buf_putu(&ptr, &left, refcnt);
+  buf_puts(&ptr, &left, ",cache_version=");
+  buf_putu(&ptr, &left, version);
+  buf_puts(&ptr, &left, ",fs_scanned=");
+  buf_putu(&ptr, &left, fs_scanned);
+  buf_putc(&ptr, &left, '}');
+}
+
+static int
+shared_query_cache_lookup(struct proc *p, const char *query,
+                          struct agent_tool_response *resp)
+{
+  char result[AGENT_TOOL_RESULT_MAX];
+
+  agent_runtime_init();
+  acquire(&agent_runtime_lock);
+  for(int i = 0; i < AGENT_SHARED_QUERY_CACHE_MAX; i++){
+    struct shared_query_cache *entry = &shared_query_cache[i];
+
+    if(!entry->used || entry->version != agent_file_version ||
+       !streq(entry->query, query) || !cache_access_allowed(p, entry))
+      continue;
+    entry->refcnt++;
+    query_result_with_cache(result, sizeof(result), entry->result, 1,
+                            entry->owner_pid, entry->refcnt, entry->version,
+                            0);
+    release(&agent_runtime_lock);
+    tool_resp_set(resp, AGENT_TOOL_OK, result);
+    return 1;
+  }
+  release(&agent_runtime_lock);
+  return 0;
+}
+
+static void
+shared_query_cache_store(struct proc *p, const char *query, const char *result)
+{
+  struct shared_query_cache *slot = 0;
+
+  agent_runtime_init();
+  acquire(&agent_runtime_lock);
+  for(int i = 0; i < AGENT_SHARED_QUERY_CACHE_MAX; i++){
+    if(shared_query_cache[i].used && streq(shared_query_cache[i].query, query)){
+      slot = &shared_query_cache[i];
+      break;
+    }
+    if(!shared_query_cache[i].used && slot == 0)
+      slot = &shared_query_cache[i];
+  }
+  if(slot == 0)
+    slot = &shared_query_cache[0];
+  memset(slot, 0, sizeof(*slot));
+  slot->used = 1;
+  safestrcpy(slot->query, query, sizeof(slot->query));
+  safestrcpy(slot->result, result, sizeof(slot->result));
+  slot->owner_pid = p->pid;
+  slot->owner_group = p->agent_group;
+  slot->refcnt = 1;
+  slot->version = agent_file_version;
+  release(&agent_runtime_lock);
+}
+
+static void
+agent_file_version_bump(void)
+{
+  agent_runtime_init();
+  acquire(&agent_runtime_lock);
+  agent_file_version++;
+  release(&agent_runtime_lock);
+}
+
+static void
+agent_signal_filemod(void)
+{
+  uint64 now = agent_now_safe();
+
+  for(struct proc *p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state != UNUSED &&
+       p->agent_type != AGENT_TYPE_NORMAL &&
+       p->loop_state != AGENT_LOOP_DONE &&
+       (p->watch_mask & AGENT_WATCH_FILEMOD)){
+      p->pending_events |= AGENT_EVENT_FILEMOD;
+      p->last_wakeup_reason = AGENT_EVENT_FILEMOD;
+      p->wakeup_tick = now;
+      if(p->state == SLEEPING && p->chan == p)
+        p->state = RUNNABLE;
+    }
+    release(&p->lock);
+  }
 }
 
 static uint64
@@ -435,11 +647,14 @@ agent_init_proc(struct proc *p)
   p->context_dropped_nodes = 0;
   p->heartbeat_deadline = 0;
   p->wakeup_tick = 0;
+  p->runnable_since = 0;
   memset(p->context_offsets, 0, sizeof(p->context_offsets));
   memset(p->context_lengths, 0, sizeof(p->context_lengths));
   p->watch_mask = 0;
   p->pending_events = 0;
   p->last_wakeup_reason = AGENT_EVENT_NONE;
+  p->agent_priority = AGENT_DEFAULT_PRIORITY;
+  p->agent_group = 0;
   memset(p->agent_message, 0, sizeof(p->agent_message));
 }
 
@@ -457,6 +672,7 @@ agent_after_fork(struct proc *dst, struct proc *src)
   dst->context_dropped_nodes = src->context_dropped_nodes;
   dst->heartbeat_deadline = src->heartbeat_deadline;
   dst->wakeup_tick = src->wakeup_tick;
+  dst->runnable_since = 0;
   memmove(dst->context_offsets, src->context_offsets,
           sizeof(dst->context_offsets));
   memmove(dst->context_lengths, src->context_lengths,
@@ -464,6 +680,8 @@ agent_after_fork(struct proc *dst, struct proc *src)
   dst->watch_mask = src->watch_mask;
   dst->pending_events = src->pending_events;
   dst->last_wakeup_reason = src->last_wakeup_reason;
+  dst->agent_priority = src->agent_priority;
+  dst->agent_group = src->agent_group;
   memmove(dst->agent_message, src->agent_message, sizeof(dst->agent_message));
 }
 
@@ -538,6 +756,12 @@ agent_mark_current(int type, int heartbeat_interval, uint64 resource_quota)
   p->heartbeat_interval = heartbeat_interval;
   p->resource_quota = resource_quota;
   p->loop_state = AGENT_LOOP_READY;
+  if(type == AGENT_TYPE_PRIMARY)
+    p->agent_group = p->pid;
+  else if(p->agent_group == 0)
+    p->agent_group = p->pid;
+  if(p->agent_priority <= 0)
+    p->agent_priority = AGENT_DEFAULT_PRIORITY;
   p->heartbeat_deadline = heartbeat_interval > 0 ?
                           agent_now_safe() + heartbeat_interval : 0;
   p->wakeup_tick = 0;
@@ -561,6 +785,8 @@ agent_get_info(struct proc *p, struct agent_info *info)
   info->context_path_len = p->context_path_len;
   info->context_node_count = p->context_node_count;
   info->dropped_nodes = p->context_dropped_nodes;
+  info->agent_priority = p->agent_priority;
+  info->agent_group = p->agent_group;
   return 0;
 }
 
@@ -636,11 +862,31 @@ agent_context_rollback(struct proc *p, uint64 keep_nodes)
 int
 agent_copy_tool_list(struct proc *p, uint64 dst, uint64 len)
 {
-  char tools[] =
-    "get_system_status();query_process(type);send_message(target_pid,message);"
-    "read_context();set_file_attr(path,key,value);get_file_attr(path,key);"
-    "del_file_attr(path,key);query_file(type,owner,tags,keyword)";
-  uint64 n = MIN((uint64)strlen(tools), len);
+  char tools[512];
+  char *ptr = tools;
+  int left = sizeof(tools);
+  uint64 n;
+
+  memset(tools, 0, sizeof(tools));
+  buf_puts(&ptr, &left,
+           "get_system_status();query_process(type);"
+           "send_message(target_pid,message);read_context();"
+           "set_file_attr(path,key,value);get_file_attr(path,key);"
+           "del_file_attr(path,key);"
+           "query_file(type,owner,tags,keyword,public)");
+  agent_runtime_init();
+  acquire(&agent_runtime_lock);
+  for(int i = 0; i < AGENT_DYNAMIC_TOOL_MAX; i++){
+    if(dynamic_tools[i].used &&
+       agent_same_group_or_public(p, dynamic_tools[i].owner_group,
+                                  dynamic_tools[i].flags)){
+      buf_putc(&ptr, &left, ';');
+      buf_puts(&ptr, &left, dynamic_tools[i].name);
+      buf_puts(&ptr, &left, "(dynamic)");
+    }
+  }
+  release(&agent_runtime_lock);
+  n = MIN((uint64)strlen(tools), len);
 
   if(copyout(p->pagetable, dst, tools, n) < 0)
     return -1;
@@ -819,6 +1065,8 @@ tool_set_file_attr(struct agent_tool_request *req,
   file_index_rebuild();
   release(&agent_file_lock);
   file_summary_refresh(meta);
+  agent_file_version_bump();
+  agent_signal_filemod();
   tool_resp_set(resp, AGENT_TOOL_OK, "attr set");
 }
 
@@ -888,6 +1136,8 @@ tool_del_file_attr(struct agent_tool_request *req,
       meta->attr_count--;
       file_index_rebuild();
       release(&agent_file_lock);
+      agent_file_version_bump();
+      agent_signal_filemod();
       tool_resp_set(resp, AGENT_TOOL_OK, "attr deleted");
       return;
     }
@@ -897,11 +1147,13 @@ tool_del_file_attr(struct agent_tool_request *req,
 }
 
 static void
-tool_query_file(struct agent_tool_request *req, struct agent_tool_response *resp)
+tool_query_file(struct proc *p, struct agent_tool_request *req,
+                struct agent_tool_response *resp)
 {
   struct agent_file_query_cond conds[AGENT_FILE_QUERY_COND_MAX];
   char keyword[AGENT_FILE_ATTR_VALUE_MAX];
   char buf[AGENT_TOOL_RESULT_MAX];
+  char result[AGENT_TOOL_RESULT_MAX];
   char *ptr = buf;
   int left = sizeof(buf);
   int cond_count;
@@ -911,6 +1163,8 @@ tool_query_file(struct agent_tool_request *req, struct agent_tool_response *resp
   int used_index = 0;
 
   agent_file_init();
+  if(shared_query_cache_lookup(p, req->params, resp))
+    return;
   if(file_query_parse(req->params, conds, &cond_count, keyword,
                       sizeof(keyword)) < 0){
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "bad params");
@@ -967,7 +1221,85 @@ tool_query_file(struct agent_tool_request *req, struct agent_tool_response *resp
   buf_puts(&ptr, &left, ",full_scanned=");
   buf_putu(&ptr, &left, full_scanned);
   buf_putc(&ptr, &left, '}');
-  tool_resp_set(resp, AGENT_TOOL_OK, buf);
+  shared_query_cache_store(p, req->params, buf);
+  query_result_with_cache(result, sizeof(result), buf, 0, p->pid, 1,
+                          agent_file_version, full_scanned);
+  tool_resp_set(resp, AGENT_TOOL_OK, result);
+}
+
+static void
+agent_dynamic_tool_call(struct proc *p, struct agent_tool_request *req,
+                        struct agent_tool_response *resp)
+{
+  struct agent_dynamic_tool *tool = 0;
+  struct agent_dynamic_request_slot *slot = 0;
+  int request_id;
+
+  agent_runtime_init();
+  acquire(&agent_runtime_lock);
+  for(int i = 0; i < AGENT_DYNAMIC_TOOL_MAX; i++){
+    if(dynamic_tools[i].used && streq(dynamic_tools[i].name, req->tool)){
+      tool = &dynamic_tools[i];
+      break;
+    }
+  }
+  if(tool == 0){
+    release(&agent_runtime_lock);
+    tool_resp_set(resp, AGENT_TOOL_ERR_TOOL_NOT_FOUND, "tool not found");
+    return;
+  }
+  if(!agent_same_group_or_public(p, tool->owner_group, tool->flags)){
+    release(&agent_runtime_lock);
+    tool_resp_set(resp, AGENT_TOOL_ERR_PERMISSION, "tool permission denied");
+    return;
+  }
+  for(int i = 0; i < AGENT_DYNAMIC_REQUEST_MAX; i++){
+    if(!dynamic_requests[i].used){
+      slot = &dynamic_requests[i];
+      break;
+    }
+  }
+  if(slot == 0){
+    release(&agent_runtime_lock);
+    tool_resp_set(resp, AGENT_TOOL_ERR_BUSY, "tool request queue full");
+    return;
+  }
+
+  memset(slot, 0, sizeof(*slot));
+  slot->used = 1;
+  slot->id = agent_next_request_id++;
+  if(agent_next_request_id <= 0)
+    agent_next_request_id = 1;
+  slot->caller_pid = p->pid;
+  slot->caller_group = p->agent_group;
+  slot->service_pid = tool->owner_pid;
+  safestrcpy(slot->tool, req->tool, sizeof(slot->tool));
+  safestrcpy(slot->params, req->params, sizeof(slot->params));
+  request_id = slot->id;
+  wakeup(dynamic_requests);
+
+  for(;;){
+    if(slot->replied){
+      tool_resp_set(resp, slot->status, slot->result);
+      memset(slot, 0, sizeof(*slot));
+      wakeup(dynamic_requests);
+      release(&agent_runtime_lock);
+      return;
+    }
+    if(killed(p)){
+      memset(slot, 0, sizeof(*slot));
+      wakeup(dynamic_requests);
+      release(&agent_runtime_lock);
+      tool_resp_set(resp, AGENT_TOOL_ERR_SERVICE_GONE, "caller killed");
+      return;
+    }
+    if(slot->id != request_id || !slot->used){
+      release(&agent_runtime_lock);
+      tool_resp_set(resp, AGENT_TOOL_ERR_SERVICE_GONE, "tool request lost");
+      return;
+    }
+    sleep(dynamic_requests, &agent_runtime_lock);
+  }
 }
 
 int
@@ -996,9 +1328,9 @@ agent_tool_call(struct proc *p, struct agent_tool_request *req,
   } else if(streq(req->tool, "del_file_attr")){
     tool_del_file_attr(req, resp);
   } else if(streq(req->tool, "query_file")){
-    tool_query_file(req, resp);
+    tool_query_file(p, req, resp);
   } else {
-    tool_resp_set(resp, AGENT_TOOL_ERR_TOOL_NOT_FOUND, "tool not found");
+    agent_dynamic_tool_call(p, req, resp);
   }
 
   memset(&node, 0, sizeof(node));
@@ -1024,6 +1356,123 @@ agent_tool_call(struct proc *p, struct agent_tool_request *req,
 }
 
 int
+agent_tool_register(struct proc *p, const char *name, int flags)
+{
+  struct agent_dynamic_tool *slot = 0;
+
+  if(p->agent_type == AGENT_TYPE_NORMAL)
+    return AGENT_TOOL_ERR_NOT_AGENT;
+  if(name[0] == 0 || tool_is_builtin(name) ||
+     (flags & ~AGENT_TOOL_FLAG_PUBLIC))
+    return AGENT_TOOL_ERR_BAD_PARAM;
+
+  agent_runtime_init();
+  acquire(&agent_runtime_lock);
+  for(int i = 0; i < AGENT_DYNAMIC_TOOL_MAX; i++){
+    if(dynamic_tools[i].used && streq(dynamic_tools[i].name, name)){
+      release(&agent_runtime_lock);
+      return AGENT_TOOL_ERR_BUSY;
+    }
+    if(!dynamic_tools[i].used && slot == 0)
+      slot = &dynamic_tools[i];
+  }
+  if(slot == 0){
+    release(&agent_runtime_lock);
+    return AGENT_TOOL_ERR_NO_SPACE;
+  }
+  memset(slot, 0, sizeof(*slot));
+  slot->used = 1;
+  safestrcpy(slot->name, name, sizeof(slot->name));
+  slot->owner_pid = p->pid;
+  slot->owner_group = p->agent_group;
+  slot->flags = flags;
+  release(&agent_runtime_lock);
+  return 0;
+}
+
+int
+agent_tool_recv(struct proc *p, struct agent_dynamic_tool_request *out)
+{
+  if(p->agent_type == AGENT_TYPE_NORMAL)
+    return AGENT_TOOL_ERR_NOT_AGENT;
+
+  agent_runtime_init();
+  for(;;){
+    acquire(&agent_runtime_lock);
+    for(int i = 0; i < AGENT_DYNAMIC_REQUEST_MAX; i++){
+      struct agent_dynamic_request_slot *slot = &dynamic_requests[i];
+
+      if(slot->used && !slot->delivered && slot->service_pid == p->pid){
+        memset(out, 0, sizeof(*out));
+        out->request_id = slot->id;
+        out->caller_pid = slot->caller_pid;
+        safestrcpy(out->tool, slot->tool, sizeof(out->tool));
+        safestrcpy(out->params, slot->params, sizeof(out->params));
+        slot->delivered = 1;
+        release(&agent_runtime_lock);
+        return 0;
+      }
+    }
+    if(killed(p)){
+      release(&agent_runtime_lock);
+      return -1;
+    }
+    sleep(dynamic_requests, &agent_runtime_lock);
+    release(&agent_runtime_lock);
+  }
+}
+
+int
+agent_tool_reply(struct proc *p, int request_id, const char *result, int status)
+{
+  if(p->agent_type == AGENT_TYPE_NORMAL)
+    return AGENT_TOOL_ERR_NOT_AGENT;
+
+  agent_runtime_init();
+  acquire(&agent_runtime_lock);
+  for(int i = 0; i < AGENT_DYNAMIC_REQUEST_MAX; i++){
+    struct agent_dynamic_request_slot *slot = &dynamic_requests[i];
+
+    if(slot->used && slot->id == request_id && slot->service_pid == p->pid){
+      slot->status = status;
+      safestrcpy(slot->result, result, sizeof(slot->result));
+      slot->replied = 1;
+      wakeup(dynamic_requests);
+      release(&agent_runtime_lock);
+      return 0;
+    }
+  }
+  release(&agent_runtime_lock);
+  return AGENT_TOOL_ERR_BAD_PARAM;
+}
+
+void
+agent_proc_exit(struct proc *p)
+{
+  agent_runtime_init();
+  acquire(&agent_runtime_lock);
+  for(int i = 0; i < AGENT_DYNAMIC_TOOL_MAX; i++){
+    if(dynamic_tools[i].used && dynamic_tools[i].owner_pid == p->pid)
+      memset(&dynamic_tools[i], 0, sizeof(dynamic_tools[i]));
+  }
+  for(int i = 0; i < AGENT_DYNAMIC_REQUEST_MAX; i++){
+    struct agent_dynamic_request_slot *slot = &dynamic_requests[i];
+
+    if(!slot->used)
+      continue;
+    if(slot->caller_pid == p->pid){
+      memset(slot, 0, sizeof(*slot));
+    } else if(slot->service_pid == p->pid && !slot->replied){
+      slot->status = AGENT_TOOL_ERR_SERVICE_GONE;
+      safestrcpy(slot->result, "tool service exited", sizeof(slot->result));
+      slot->replied = 1;
+    }
+  }
+  wakeup(dynamic_requests);
+  release(&agent_runtime_lock);
+}
+
+int
 agent_proc_heartbeat_set(struct proc *p, int interval)
 {
   if(p->agent_type == AGENT_TYPE_NORMAL)
@@ -1033,7 +1482,10 @@ agent_proc_heartbeat_set(struct proc *p, int interval)
 
   acquire(&p->lock);
   p->heartbeat_interval = interval;
-  p->heartbeat_deadline = agent_now_safe() + interval;
+  p->heartbeat_deadline = agent_now_safe() + interval + 1;
+  p->pending_events &= ~AGENT_EVENT_HEARTBEAT;
+  if(p->last_wakeup_reason == AGENT_EVENT_HEARTBEAT)
+    p->last_wakeup_reason = AGENT_EVENT_NONE;
   if(p->loop_state != AGENT_LOOP_DONE)
     p->loop_state = AGENT_LOOP_READY;
   release(&p->lock);
@@ -1057,11 +1509,25 @@ agent_proc_heartbeat_stop(struct proc *p)
 }
 
 int
+agent_proc_priority_set(struct proc *p, int priority)
+{
+  if(p->agent_type == AGENT_TYPE_NORMAL)
+    return AGENT_TOOL_ERR_NOT_AGENT;
+  if(priority < 0 || priority > AGENT_MAX_PRIORITY)
+    return -1;
+
+  acquire(&p->lock);
+  p->agent_priority = priority;
+  release(&p->lock);
+  return 0;
+}
+
+int
 agent_proc_watch(struct proc *p, int mask)
 {
   if(p->agent_type == AGENT_TYPE_NORMAL)
     return AGENT_TOOL_ERR_NOT_AGENT;
-  if(mask & ~AGENT_WATCH_MESSAGE)
+  if(mask & ~(AGENT_WATCH_MESSAGE | AGENT_WATCH_FILEMOD))
     return -1;
 
   acquire(&p->lock);
@@ -1085,6 +1551,8 @@ agent_proc_unwatch(struct proc *p, int mask)
     p->watch_mask &= ~mask;
   if(!(p->watch_mask & AGENT_WATCH_MESSAGE))
     p->pending_events &= ~AGENT_EVENT_MESSAGE;
+  if(!(p->watch_mask & AGENT_WATCH_FILEMOD))
+    p->pending_events &= ~AGENT_EVENT_FILEMOD;
   release(&p->lock);
   return 0;
 }
@@ -1141,6 +1609,42 @@ agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent)
     sched();
     p->chan = 0;
   }
+}
+
+static int
+agent_event_weight(int pending_events)
+{
+  if(pending_events & AGENT_EVENT_MESSAGE)
+    return 30;
+  if(pending_events & AGENT_EVENT_FILEMOD)
+    return 20;
+  if(pending_events & AGENT_EVENT_HEARTBEAT)
+    return 10;
+  return 0;
+}
+
+int
+agent_schedule_score(struct proc *p, uint64 now)
+{
+  int priority = AGENT_DEFAULT_PRIORITY;
+  int score;
+  int aging = 0;
+
+  if(p->state != RUNNABLE)
+    return -1;
+  if(p->runnable_since == 0)
+    p->runnable_since = now ? now : 1;
+  if(now > p->runnable_since)
+    aging = (now - p->runnable_since) / AGENT_AGING_DIVISOR;
+  if(aging > AGENT_AGING_MAX)
+    aging = AGENT_AGING_MAX;
+
+  if(p->agent_type != AGENT_TYPE_NORMAL)
+    priority = p->agent_priority;
+  score = priority * 10 + aging;
+  if(p->agent_type != AGENT_TYPE_NORMAL)
+    score += agent_event_weight(p->pending_events);
+  return score;
 }
 
 void

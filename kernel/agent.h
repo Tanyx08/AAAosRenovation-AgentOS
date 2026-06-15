@@ -21,8 +21,12 @@
 #define AGENT_EVENT_NONE (0)
 #define AGENT_EVENT_HEARTBEAT (1)
 #define AGENT_EVENT_MESSAGE (2)
+#define AGENT_EVENT_FILEMOD (4)
 
 #define AGENT_WATCH_MESSAGE AGENT_EVENT_MESSAGE
+#define AGENT_WATCH_FILEMOD AGENT_EVENT_FILEMOD
+
+#define AGENT_TOOL_FLAG_PUBLIC (1)
 
 #define AGENT_TOOL_NAME_MAX (32)
 #define AGENT_TOOL_PARAM_MAX (128)
@@ -31,12 +35,17 @@
 #define AGENT_CONTEXT_RES_MAX (160)
 #define AGENT_CONTEXT_MAX_NODES (16)
 #define AGENT_MESSAGE_MAX (128)
+#define AGENT_DYNAMIC_TOOL_MAX (8)
+#define AGENT_DYNAMIC_REQUEST_MAX (8)
 
 #define AGENT_TOOL_OK (0)
 #define AGENT_TOOL_ERR_TOOL_NOT_FOUND (-1)
 #define AGENT_TOOL_ERR_BAD_PARAM (-2)
 #define AGENT_TOOL_ERR_NOT_AGENT (-3)
 #define AGENT_TOOL_ERR_NO_SPACE (-4)
+#define AGENT_TOOL_ERR_BUSY (-5)
+#define AGENT_TOOL_ERR_PERMISSION (-6)
+#define AGENT_TOOL_ERR_SERVICE_GONE (-7)
 
 struct proc;
 
@@ -50,6 +59,8 @@ struct agent_info {
   uint64 context_path_len;
   uint64 context_node_count;
   uint64 dropped_nodes;
+  int agent_priority;
+  int agent_group;
 };
 
 struct agent_tool_request {
@@ -90,6 +101,13 @@ struct agent_wait_event {
   char message[AGENT_MESSAGE_MAX];
 };
 
+struct agent_dynamic_tool_request {
+  int request_id;
+  int caller_pid;
+  char tool[AGENT_TOOL_NAME_MAX];
+  char params[AGENT_TOOL_PARAM_MAX];
+};
+
 void agent_init_proc(struct proc *p);
 void agent_after_fork(struct proc *dst, struct proc *src);
 void agent_context_clear(struct proc *p);
@@ -107,6 +125,13 @@ int agent_proc_heartbeat_stop(struct proc *p);
 int agent_proc_watch(struct proc *p, int mask);
 int agent_proc_unwatch(struct proc *p, int mask);
 int agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent);
+int agent_proc_priority_set(struct proc *p, int priority);
+int agent_tool_register(struct proc *p, const char *name, int flags);
+int agent_tool_recv(struct proc *p, struct agent_dynamic_tool_request *out);
+int agent_tool_reply(struct proc *p, int request_id, const char *result,
+                     int status);
+void agent_proc_exit(struct proc *p);
+int agent_schedule_score(struct proc *p, uint64 now);
 void agent_tick(uint64 now);
 
 #endif

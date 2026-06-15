@@ -193,6 +193,7 @@ UPROGS=\
 	$U/_mmaptest\
 	$U/_agenttest\
 	$U/_agentlooptest\
+	$U/_agentinnovationtest\
 
 
 
