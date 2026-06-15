@@ -55,3 +55,5 @@ entry("agent_priority_set");
 entry("tool_register");
 entry("tool_recv");
 entry("tool_reply");
+entry("agent_watch_file");
+entry("agent_sched_set");

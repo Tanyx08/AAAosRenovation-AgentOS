@@ -28,6 +28,16 @@ struct superblock {
 #define NINDIRECT (BSIZE / sizeof(uint))
 #define MAXFILE (NDIRECT + NINDIRECT)
 
+#define INODE_ATTR_MAX 4
+#define INODE_ATTR_KEY_MAX 8
+#define INODE_ATTR_VALUE_MAX 16
+#define INODE_SUMMARY_MAX 64
+
+struct inode_attr {
+  char key[INODE_ATTR_KEY_MAX];
+  char value[INODE_ATTR_VALUE_MAX];
+};
+
 // On-disk inode structure
 struct dinode {
   short type;           // File type
@@ -36,6 +46,11 @@ struct dinode {
   short nlink;          // Number of links to inode in file system
   uint size;            // Size of file (bytes)
   uint addrs[NDIRECT+1];   // Data block addresses
+  short attr_count;     // Agent metadata count
+  short meta_reserved;
+  char summary[INODE_SUMMARY_MAX];
+  struct inode_attr attrs[INODE_ATTR_MAX];
+  char meta_padding[28];
 };
 
 // Inodes per block.
@@ -57,4 +72,3 @@ struct dirent {
   ushort inum;
   char name[DIRSIZ];
 };
-

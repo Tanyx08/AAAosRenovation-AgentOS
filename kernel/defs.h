@@ -45,6 +45,7 @@ void            fileinit(void);
 int             fileread(struct file*, uint64, int n);
 int             filestat(struct file*, uint64 addr);
 int             filewrite(struct file*, uint64, int n);
+void            agent_notify_file_modified(uint, uint);
 
 // fs.c
 void            fsinit(int);

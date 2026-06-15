@@ -47,6 +47,11 @@
 #define AGENT_TOOL_ERR_PERMISSION (-6)
 #define AGENT_TOOL_ERR_SERVICE_GONE (-7)
 
+#define AGENT_SCHED_PRIORITY_MIN (1)
+#define AGENT_SCHED_PRIORITY_MAX (8)
+#define AGENT_SCHED_QUOTA_MIN (1)
+#define AGENT_SCHED_QUOTA_MAX (8)
+
 struct proc;
 
 struct agent_info {
@@ -61,6 +66,9 @@ struct agent_info {
   uint64 dropped_nodes;
   int agent_priority;
   int agent_group;
+  int sched_priority;
+  int sched_quota;
+  int sched_budget;
 };
 
 struct agent_tool_request {
@@ -99,6 +107,7 @@ struct agent_wait_event {
   uint32 reserved;
   uint64 tick;
   char message[AGENT_MESSAGE_MAX];
+  char file[AGENT_MESSAGE_MAX];
 };
 
 struct agent_dynamic_tool_request {
@@ -124,6 +133,8 @@ int agent_proc_heartbeat_set(struct proc *p, int interval);
 int agent_proc_heartbeat_stop(struct proc *p);
 int agent_proc_watch(struct proc *p, int mask);
 int agent_proc_unwatch(struct proc *p, int mask);
+int agent_proc_watch_file(struct proc *p, uint64 upath);
+int agent_proc_sched_set(struct proc *p, int priority, int quota);
 int agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent);
 int agent_proc_priority_set(struct proc *p, int priority);
 int agent_tool_register(struct proc *p, const char *name, int flags);
@@ -133,5 +144,6 @@ int agent_tool_reply(struct proc *p, int request_id, const char *result,
 void agent_proc_exit(struct proc *p);
 int agent_schedule_score(struct proc *p, uint64 now);
 void agent_tick(uint64 now);
+void agent_notify_file_modified(uint dev, uint inum);
 
 #endif

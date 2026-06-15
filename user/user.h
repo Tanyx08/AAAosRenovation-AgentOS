@@ -54,6 +54,8 @@ int agent_priority_set(int);
 int tool_register(const char*, int);
 int tool_recv(void*);
 int tool_reply(int, const char*, int);
+int agent_watch_file(const char*);
+int agent_sched_set(int, int);
 
 // ulib.c
 int stat(const char*, struct stat*);

@@ -219,3 +219,23 @@ sys_tool_reply(void)
   argint(2, &status);
   return agent_tool_reply(myproc(), request_id, result, status);
 }
+
+uint64
+sys_agent_watch_file(void)
+{
+  uint64 upath;
+
+  argaddr(0, &upath);
+  return agent_proc_watch_file(myproc(), upath);
+}
+
+uint64
+sys_agent_sched_set(void)
+{
+  int priority;
+  int quota;
+
+  argint(0, &priority);
+  argint(1, &quota);
+  return agent_proc_sched_set(myproc(), priority, quota);
+}

@@ -120,6 +120,8 @@ extern uint64 sys_agent_priority_set(void);
 extern uint64 sys_tool_register(void);
 extern uint64 sys_tool_recv(void);
 extern uint64 sys_tool_reply(void);
+extern uint64 sys_agent_watch_file(void);
+extern uint64 sys_agent_sched_set(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -164,6 +166,8 @@ static uint64 (*syscalls[])(void) = {
 [SYS_tool_register] sys_tool_register,
 [SYS_tool_recv] sys_tool_recv,
 [SYS_tool_reply] sys_tool_reply,
+[SYS_agent_watch_file] sys_agent_watch_file,
+[SYS_agent_sched_set] sys_agent_sched_set,
 };
 
 void

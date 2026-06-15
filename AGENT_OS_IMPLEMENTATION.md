@@ -151,9 +151,11 @@ Agent Loop:
   agent_heartbeat_set(interval)
   agent_heartbeat_stop()
   agent_watch(mask)
+  agent_watch_file(path)
   agent_wait(continue_loop, event)
   agent_unwatch(mask)
   agent_priority_set(priority)
+  agent_sched_set(priority, quota)
 
 动态工具:
   tool_register(name, flags)
@@ -321,7 +323,7 @@ Agent 进程:
 
 ## 9. AgentFS 文件查询系统
 
-AgentFS 对应任务四，是 xv6 文件系统上的运行时元数据层。它不修改磁盘 inode 格式，而是在内核内存中维护文件属性、摘要和索引。
+AgentFS 对应任务四。合并远端实现后，文件属性和摘要进入 xv6 inode/dinode：`set_file_attr` 会更新 inode 中的 attrs/summary 并 `iupdate()` 写回磁盘；内核同时维护运行时索引缓存，用于加速 `query_file`。
 
 核心结构：
 
@@ -329,11 +331,10 @@ AgentFS 对应任务四，是 xv6 文件系统上的运行时元数据层。它�
 struct agent_file_meta {
   int used;
   uint inum;
-  char path[DIRSIZ + 1];
-  char summary[AGENT_FILE_SUMMARY_MAX];
+  char path[AGENT_FILE_PATH_MAX];
+  char summary[INODE_SUMMARY_MAX];
   int attr_count;
-  struct agent_file_attr attrs[AGENT_FILE_ATTR_MAX];
-  int index_next;
+  struct inode_attr attrs[INODE_ATTR_MAX];
 };
 ```
 
@@ -342,17 +343,19 @@ struct agent_file_meta {
 ```text
 set_file_attr:
   namei(path) 校验普通文件存在
-  更新 key/value 属性
+  更新 inode key/value 属性
   刷新 summary
-  重建属性哈希索引
+  iupdate 写回 dinode
+  重建运行时属性哈希索引
   递增 AgentFS version
   触发 FILEMOD 事件
 
 get_file_attr:
-  从运行时元数据表读取指定属性
+  从 inode 读取指定属性
 
 del_file_attr:
-  删除属性
+  删除 inode 属性
+  iupdate 写回 dinode
   重建索引
   递增版本
   触发 FILEMOD 事件
@@ -761,6 +764,7 @@ make qemu
 ```text
 agenttest
 agentlooptest
+agentfsbench
 agentinnovationtest
 ```
 
@@ -769,6 +773,7 @@ agentinnovationtest
 ```text
 agenttest: all tests passed
 agentlooptest: all tests passed
+agentfsbench: all tests passed
 agentinnovationtest: all tests passed
 ```
 
@@ -787,8 +792,15 @@ agenttest:
 agentlooptest:
   heartbeat_test
   message_only_test
+  filemod/watch_file 测试
   worker_loop 生命周期
   multi_agent_test 多 Agent 等待和唤醒
+  priority/quota 调度测试
+
+agentfsbench:
+  批量创建带属性文件
+  对比索引查询和 mode=scan 全表扫描
+  验证 index_scanned 小于 full_scanned
 
 agentinnovationtest:
   shared_cache_test
@@ -814,7 +826,6 @@ mmaptest
 
 ```text
 Agent Context 区使用 uvmalloc 追加到用户地址空间末尾，不是独立 VMA
-AgentFS 属性和摘要保存在内核内存表，重启后不持久化
 query_file 的内容检索是摘要子串匹配，不是 embedding 或语义搜索
 query_file 的索引策略只使用第一个属性条件定位哈希桶
 send_message 使用单消息槽，不是完整消息队列
@@ -827,7 +838,6 @@ send_message 使用单消息槽，不是完整消息队列
 
 ```text
 Agent Context 专用 VMA
-AgentFS 元数据持久化
 多条件索引选择
 消息队列
 动态工具超时/取消机制

@@ -478,6 +478,21 @@ wait(uint64 addr)
   }
 }
 
+static void
+agent_sched_refill_budgets(void)
+{
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state != UNUSED &&
+       p->agent_type != AGENT_TYPE_NORMAL &&
+       p->agent_sched_quota > 0)
+      p->agent_sched_budget = p->agent_sched_quota;
+    release(&p->lock);
+  }
+}
+
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
 // Scheduler never returns.  It loops, doing:
@@ -493,7 +508,8 @@ scheduler(void)
   struct cpu *c = mycpu();
   uint64 now;
   int score;
-  int bestscore;
+  int best_score;
+  int runnable_exhausted_agents;
 
   c->proc = 0;
   for(;;){
@@ -507,15 +523,23 @@ scheduler(void)
     release(&tickslock);
 
     best = 0;
-    bestscore = -1;
+    best_score = -1;
+    runnable_exhausted_agents = 0;
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if(p->state == RUNNABLE) {
+        if(p->agent_type != AGENT_TYPE_NORMAL &&
+           p->agent_sched_quota > 0 &&
+           p->agent_sched_budget <= 0){
+          runnable_exhausted_agents = 1;
+          release(&p->lock);
+          continue;
+        }
         score = agent_schedule_score(p, now);
-        if(score > bestscore){
+        if(score > best_score){
           if(best != 0)
             release(&best->lock);
-          bestscore = score;
+          best_score = score;
           best = p;
           continue;
         }
@@ -535,7 +559,15 @@ scheduler(void)
       // Process is done running for now.
       // It should have changed its p->state before coming back.
       c->proc = 0;
+      if(best->agent_type != AGENT_TYPE_NORMAL){
+        if(best->agent_sched_quota > 0 && best->agent_sched_budget > 0)
+          best->agent_sched_budget--;
+        if(best->agent_sched_boost > 0)
+          best->agent_sched_boost--;
+      }
       release(&best->lock);
+    } else if(runnable_exhausted_agents){
+      agent_sched_refill_budgets();
     }
   }
 }

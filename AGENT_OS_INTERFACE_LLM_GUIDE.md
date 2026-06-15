@@ -31,6 +31,7 @@ make qemu
 ```text
 agenttest
 agentlooptest
+agentfsbench
 agentinnovationtest
 ```
 
@@ -39,6 +40,7 @@ agentinnovationtest
 ```text
 agenttest: all tests passed
 agentlooptest: all tests passed
+agentfsbench: all tests passed
 agentinnovationtest: all tests passed
 ```
 
@@ -74,9 +76,11 @@ int context_clear(void);
 int agent_heartbeat_set(int interval);
 int agent_heartbeat_stop(void);
 int agent_watch(int mask);
+int agent_watch_file(const char *path);
 int agent_wait(int continue_loop, void *event);
 int agent_unwatch(int mask);
 int agent_priority_set(int priority);
+int agent_sched_set(int priority, int quota);
 
 int tool_register(const char *name, int flags);
 int tool_recv(void *request);
@@ -604,7 +608,29 @@ multi_agent_test:
   两个 Worker Agent 并发等待和唤醒
 ```
 
-### 11.3 `agentinnovationtest`
+### 11.3 `agentfsbench`
+
+运行：
+
+```text
+agentfsbench
+```
+
+覆盖内容：
+
+```text
+批量创建带属性文件
+对比 query_file 索引查询和 mode=scan 全表扫描
+验证 indexed query 的 index_scanned 小于 full_scanned
+```
+
+期望结果：
+
+```text
+agentfsbench: all tests passed
+```
+
+### 11.4 `agentinnovationtest`
 
 运行：
 
@@ -897,7 +923,7 @@ xv6 内核环境很小，实现 JSON parser 成本高，也更容易引入边界
 
 ### Q: 文件属性会持久化吗？
 
-当前不会。属性和摘要保存在内核内存表中，重启后消失。后续可以通过 `.agentmeta` 文件或扩展 inode 实现持久化。
+会。合并远端实现后，属性和摘要已经写入 inode/dinode；内核仍会维护运行时索引缓存来加速 `query_file`。
 
 ### Q: `query_file` 是语义搜索吗？
 
@@ -905,7 +931,7 @@ xv6 内核环境很小，实现 JSON parser 成本高，也更容易引入边界
 
 ### Q: 多 Agent 有专门优先级调度吗？
 
-有。当前调度器会计算 `agent_priority * 10 + event_weight + aging_bonus`，同优先级下 MESSAGE 优先于 FILEMOD，FILEMOD 优先于 HEARTBEAT。普通进程仍有默认分和 aging，避免长期饥饿。
+有。当前调度器会综合 `agent_priority`、远端的 `agent_sched_set(priority, quota)`、事件权重和 aging；同优先级下 MESSAGE 优先于 FILEMOD，FILEMOD 优先于 HEARTBEAT。普通进程仍有默认分和 aging，避免长期饥饿。
 
 ### Q: 真实 LLM 一定要 OpenAI 吗？
 

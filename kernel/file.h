@@ -27,6 +27,9 @@ struct inode {
   short nlink;
   uint size;
   uint addrs[NDIRECT+1];
+  short attr_count;
+  char summary[INODE_SUMMARY_MAX];
+  struct inode_attr attrs[INODE_ATTR_MAX];
 };
 
 // map major device number to device functions.

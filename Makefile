@@ -192,6 +192,7 @@ UPROGS=\
 	$U/_zombie\
 	$U/_mmaptest\
 	$U/_agenttest\
+	$U/_agentfsbench\
 	$U/_agentlooptest\
 	$U/_agentinnovationtest\
 

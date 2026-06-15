@@ -39,3 +39,5 @@
 #define SYS_tool_register 38
 #define SYS_tool_recv 39
 #define SYS_tool_reply 40
+#define SYS_agent_watch_file 41
+#define SYS_agent_sched_set 42

@@ -144,4 +144,11 @@ struct proc {
   int agent_priority;
   int agent_group;
   char agent_message[AGENT_MESSAGE_MAX];
+  uint agent_watch_dev;
+  uint agent_watch_inum;
+  char agent_watch_path[AGENT_MESSAGE_MAX];
+  int agent_sched_priority;
+  int agent_sched_quota;
+  int agent_sched_budget;
+  int agent_sched_boost;
 };
