@@ -493,6 +493,30 @@ agent_sched_refill_budgets(void)
   }
 }
 
+static int
+agent_sched_can_refill_budgets(void)
+{
+  struct proc *p;
+  int has_exhausted = 0;
+
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state != UNUSED &&
+       p->agent_type != AGENT_TYPE_NORMAL &&
+       p->agent_sched_quota > 0){
+      if((p->state == RUNNABLE || p->state == RUNNING) &&
+         p->agent_sched_budget > 0){
+        release(&p->lock);
+        return 0;
+      }
+      if(p->state == RUNNABLE && p->agent_sched_budget <= 0)
+        has_exhausted = 1;
+    }
+    release(&p->lock);
+  }
+  return has_exhausted;
+}
+
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
 // Scheduler never returns.  It loops, doing:
@@ -566,7 +590,7 @@ scheduler(void)
           best->agent_sched_boost--;
       }
       release(&best->lock);
-    } else if(runnable_exhausted_agents){
+    } else if(runnable_exhausted_agents && agent_sched_can_refill_budgets()){
       agent_sched_refill_budgets();
     }
   }

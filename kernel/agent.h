@@ -1,3 +1,10 @@
+// Agent-OS 公共内核 ABI。
+//
+// 这个头文件定义了 Agent-OS 内核子系统与用户态 Agent 程序共享使用的
+// 常量、结构体和函数声明。内容包括 Agent Context 布局、工具调用请求/
+// 响应格式、等待事件结构、动态工具请求结构，以及 Agent 管理相关的
+// 主要内核入口函数。
+
 #ifndef XV6_AGENT_H
 #define XV6_AGENT_H
 
@@ -142,6 +149,16 @@ int agent_tool_recv(struct proc *p, struct agent_dynamic_tool_request *out);
 int agent_tool_reply(struct proc *p, int request_id, const char *result,
                      int status);
 void agent_proc_exit(struct proc *p);
+void agentfs_tool_set_file_attr(struct agent_tool_request *req,
+                                struct agent_tool_response *resp);
+void agentfs_tool_get_file_attr(struct agent_tool_request *req,
+                                struct agent_tool_response *resp);
+void agentfs_tool_del_file_attr(struct agent_tool_request *req,
+                                struct agent_tool_response *resp);
+void agentfs_tool_query_file(struct proc *p, struct agent_tool_request *req,
+                             struct agent_tool_response *resp);
+void agent_signal_filemod(void);
+void agent_signal_event_locked(struct proc *p, int event, uint64 now);
 int agent_schedule_score(struct proc *p, uint64 now);
 void agent_tick(uint64 now);
 void agent_notify_file_modified(uint dev, uint inum);

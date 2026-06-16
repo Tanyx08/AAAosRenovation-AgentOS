@@ -21,6 +21,10 @@ OBJS = \
   $K/syscall.o \
   $K/sysproc.o \
   $K/agent.o \
+  $K/agent_context.o \
+  $K/agent_fs.o \
+  $K/agent_loop.o \
+  $K/agent_tool.o \
   $K/sysagent.o \
   $K/bio.o \
   $K/fs.o \

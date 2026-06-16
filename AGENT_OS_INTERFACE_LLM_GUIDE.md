@@ -4,12 +4,31 @@
 
 内核实现细节请看 `AGENT_OS_IMPLEMENTATION.md`。
 
+当前内核侧已经按职责拆分为：
+
+```text
+kernel/agent.c
+  Agent 核心元信息与创建逻辑
+
+kernel/agent_context.c
+  Agent Context 区和 Context Path 管理
+
+kernel/agent_fs.c
+  AgentFS、文件属性、索引和共享查询缓存
+
+kernel/agent_loop.c
+  心跳、事件、agent_wait 和调度评分
+
+kernel/agent_tool.c
+  内置工具分发和动态工具注册/调用机制
+```
+
 ## 1. 快速开始
 
 进入仓库：
 
 ```bash
-cd ~/workspace/xv6-2023-mit-labs
+cd ~/gitStore/project3136859-388760
 ```
 
 构建：

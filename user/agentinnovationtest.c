@@ -121,6 +121,12 @@ send_message_to(int pid, const char *message)
   return call_tool("send_message", params, &resp);
 }
 
+/*
+  * Test that shared query cache is populated by one agent and reused by another,
+  * and that cache is invalidated when metadata version changes.
+  * 第一个 Agent 先查询一次，期望 cache_hit=0，然后 fork 出一个子 Agent，子 Agent 查询同样的内容，期望 cache_hit=1，
+  * 最后修改文件属性使得元数据版本改变，再次查询期望 cache_hit=0。
+  */
 static void
 shared_cache_test(void)
 {

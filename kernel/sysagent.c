@@ -1,3 +1,10 @@
+// Agent-OS 系统调用桥接层。
+//
+// 这个文件包含 Agent-OS 子系统的系统调用入口封装。每个封装函数负责：
+//  从用户态复制参数、调用 agent.c 中对应的 Agent 内核辅助函数，并在需要时
+//  把结构化结果复制回用户态。它位于通用 syscall 分发层与 Agent 运行时核心
+//  之间，承担参数转换与边界适配的职责。
+
 #include "types.h"
 #include "riscv.h"
 #include "defs.h"

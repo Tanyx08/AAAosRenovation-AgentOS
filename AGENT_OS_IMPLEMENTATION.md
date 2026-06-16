@@ -41,7 +41,7 @@
 
 ## 3. 总体架构
 
-整体结构分为用户态 Agent、系统调用入口、Agent 内核核心层、AgentFS 元数据层、动态工具服务层和调度层：
+整体结构分为用户态 Agent、系统调用入口、Agent 内核核心层、Context 层、AgentFS 层、Agent Loop 层、工具调用层和调度层：
 
 ```text
 User Agent / Tool Service
@@ -56,11 +56,23 @@ kernel/sysagent.c
   v
 kernel/agent.c
   |-- Agent process metadata
-  |-- Context Path
-  |-- Built-in Tool Call
-  |-- AgentFS metadata/index/cache
-  |-- Agent Loop events
-  |-- Dynamic tool registry/request table
+  |-- agent_create / agent_info / fork 继承默认值
+  |
+  |--> kernel/agent_context.c
+  |     |-- Agent Context 区
+  |     |-- Context Path 追加 / 查询 / 回滚 / 清空 / 淘汰
+  |
+  |--> kernel/agent_fs.c
+  |     |-- AgentFS metadata / index / cache
+  |     |-- set/get/del/query_file
+  |
+  |--> kernel/agent_loop.c
+  |     |-- heartbeat / message / filemod
+  |     |-- agent_wait / lifecycle / scheduler score
+  |
+  |--> kernel/agent_tool.c
+  |     |-- Built-in Tool Call
+  |     |-- Dynamic tool registry / request table
   |
   v
 kernel/proc.c
@@ -68,11 +80,12 @@ kernel/proc.c
   |-- event-aware scheduler
 ```
 
-这个分层有两个好处：
+这个分层有三个好处：
 
 ```text
 sysagent.c 只负责 syscall 边界和用户/内核拷贝
-agent.c 负责 Agent 语义和数据结构
+agent.c 只保留 Agent 核心元信息与创建逻辑
+agent_context/agent_fs/agent_loop/agent_tool 四个文件分别对应任务三/四/五/二
 proc.c 只在进程生命周期和调度点接入 Agent 逻辑
 ```
 
@@ -85,8 +98,27 @@ kernel/agent.h
   Agent-OS 公共 ABI、常量、结构体和内核函数声明。
 
 kernel/agent.c
-  Agent 核心逻辑：进程标记、Context Path、Tool Call、AgentFS、
-  共享查询缓存、Agent Loop、动态工具注册。
+  Agent 核心逻辑：进程标记、默认调度参数、PCB 中 Agent 字段初始化、
+  agent_create / agent_info / fork 继承。
+
+kernel/agent_context.c
+  用户态 Agent Context 区与 Context Path 管理：
+  Header 同步、路径追加、查询、回滚、清空和 FIFO 淘汰。
+
+kernel/agent_fs.c
+  任务四 AgentFS：
+  inode 属性维护、摘要刷新、运行时元数据缓存、倒排索引、
+  query_file 查询优化和共享查询缓存。
+
+kernel/agent_loop.c
+  任务五 Agent Loop：
+  心跳、消息事件、文件修改事件、agent_wait 生命周期、
+  调度评分、tick 驱动唤醒。
+
+kernel/agent_tool.c
+  任务二和动态工具机制：
+  内置工具分发、tool_list、动态工具注册/收取/回复、
+  动态工具请求表与权限控制。
 
 kernel/sysagent.c
   Agent 系统调用入口，负责 argint/argaddr/argstr、copyin/copyout。
@@ -117,7 +149,27 @@ user/agentinnovationtest.c
   三个创新点的集中演示测试。
 
 Makefile
-  编译 agent.o、sysagent.o 和三个测试程序。
+  编译 agent.o、agent_context.o、agent_fs.o、agent_loop.o、
+  agent_tool.o、sysagent.o 和测试程序。
+```
+
+其中当前 Agent 内核模块和赛题任务的对应关系可以直接概括为：
+
+```text
+任务一:
+  kernel/agent.c + kernel/agent_context.c
+
+任务二:
+  kernel/agent_tool.c
+
+任务三:
+  kernel/agent_context.c
+
+任务四:
+  kernel/agent_fs.c
+
+任务五:
+  kernel/agent_loop.c + kernel/proc.c + kernel/trap.c
 ```
 
 ## 5. Agent ABI 与系统调用
@@ -289,7 +341,7 @@ quota eviction:
 
 ## 8. Tool Call 结构化交互
 
-Tool Call 对应任务二。普通进程不能直接调用 Agent 工具；必须先通过 `agent_create()` 成为 Agent。内核在 `agent_tool_call()` 中进行检查：
+Tool Call 对应任务二。普通进程不能直接调用 Agent 工具；必须先通过 `agent_create()` 成为 Agent。当前这部分实现主要位于 `kernel/agent_tool.c`，内核在 `agent_tool_call()` 中进行检查：
 
 ```text
 普通进程:
@@ -323,7 +375,7 @@ Agent 进程:
 
 ## 9. AgentFS 文件查询系统
 
-AgentFS 对应任务四。合并远端实现后，文件属性和摘要进入 xv6 inode/dinode：`set_file_attr` 会更新 inode 中的 attrs/summary 并 `iupdate()` 写回磁盘；内核同时维护运行时索引缓存，用于加速 `query_file`。
+AgentFS 对应任务四。当前这部分实现集中位于 `kernel/agent_fs.c`。文件属性和摘要进入 xv6 inode/dinode：`set_file_attr` 会更新 inode 中的 attrs/summary 并 `iupdate()` 写回磁盘；内核同时维护运行时索引缓存，用于加速 `query_file`。
 
 核心结构：
 
@@ -455,7 +507,7 @@ cache_version    缓存对应的 AgentFS 元数据版本
 
 ## 11. Agent Loop：事件等待与生命周期
 
-Agent Loop 对应任务五。核心目标是让 Agent 在无事可做时真正睡眠，并由内核事件唤醒，而不是在用户态忙等。
+Agent Loop 对应任务五。当前这部分实现集中位于 `kernel/agent_loop.c`，核心目标是让 Agent 在无事可做时真正睡眠，并由内核事件唤醒，而不是在用户态忙等。
 
 ### 11.1 事件类型
 
