@@ -657,6 +657,14 @@ inode_summary_refresh(struct inode *ip)
 }
 
 void
+agentfs_content_changed(void)
+{
+  file_index_build();
+  agent_file_version_bump();
+  agent_signal_filemod();
+}
+
+void
 agentfs_tool_set_file_attr(struct agent_tool_request *req,
                            struct agent_tool_response *resp)
 {
@@ -807,10 +815,10 @@ agentfs_tool_query_file(struct proc *p, struct agent_tool_request *req,
 {
   struct agent_file_query_cond conds[AGENT_FILE_QUERY_COND_MAX];
   char keyword[INODE_ATTR_VALUE_MAX];
-  char buf[AGENT_TOOL_RESULT_MAX];
-  char result[AGENT_TOOL_RESULT_MAX];
-  char *ptr = buf;
-  int left = sizeof(buf);
+  char *buf;
+  char *result;
+  char *ptr;
+  int left = AGENT_TOOL_RESULT_MAX;
   int cond_count;
   int force_scan;
   int count = 0;
@@ -820,15 +828,28 @@ agentfs_tool_query_file(struct proc *p, struct agent_tool_request *req,
   uint64 ticks_begin;
   uint64 ticks_end;
 
-  if(shared_query_cache_lookup(p, req->params, resp))
+  buf = kalloc();
+  result = kalloc();
+  if(buf == 0 || result == 0){
+    if(buf)
+      kfree(buf);
+    if(result)
+      kfree(result);
+    tool_resp_set(resp, AGENT_TOOL_ERR_NO_SPACE, "no memory");
     return;
+  }
+  ptr = buf;
+  left = AGENT_TOOL_RESULT_MAX;
+
+  if(shared_query_cache_lookup(p, req->params, resp))
+    goto done;
   file_index_ensure();
   if(file_query_parse(req->params, conds, &cond_count, keyword,
                       sizeof(keyword), &force_scan) < 0){
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "bad params");
-    return;
+    goto done;
   }
-  memset(buf, 0, sizeof(buf));
+  memset(buf, 0, AGENT_TOOL_RESULT_MAX);
   buf_puts(&ptr, &left, "{status=ok,files=[");
   acquire(&agent_file_lock);
   ticks_begin = agent_now_safe();
@@ -891,7 +912,10 @@ agentfs_tool_query_file(struct proc *p, struct agent_tool_request *req,
   buf_putu(&ptr, &left, ticks_end - ticks_begin);
   buf_putc(&ptr, &left, '}');
   shared_query_cache_store(p, req->params, buf);
-  query_result_with_cache(result, sizeof(result), buf, 0, p->pid, 1,
+  query_result_with_cache(result, AGENT_TOOL_RESULT_MAX, buf, 0, p->pid, 1,
                           agent_file_version, full_scanned);
   tool_resp_set(resp, AGENT_TOOL_OK, result);
+done:
+  kfree(buf);
+  kfree(result);
 }

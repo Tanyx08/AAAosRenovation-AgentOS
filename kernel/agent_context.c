@@ -97,7 +97,8 @@ agent_evict_oldest(struct proc *p)
   uint64 base = agent_path_base(p);
   uint64 first_len;
   uint64 remain;
-  char tmp[AGENT_CONTEXT_REGION_SIZE];
+  char tmp[128];
+  uint64 copied = 0;
 
   if(p->context_node_count == 0){
     p->context_path_len = 0;
@@ -107,15 +108,16 @@ agent_evict_oldest(struct proc *p)
   if(first_len > p->context_path_len)
     first_len = p->context_path_len;
   remain = p->context_path_len - first_len;
-  if(remain > sizeof(tmp))
-    remain = sizeof(tmp);
-  if(remain > 0){
-    if(copyin(p->pagetable, tmp, base + first_len, remain) < 0 ||
-       copyout(p->pagetable, base, tmp, remain) < 0){
+  while(copied < remain){
+    uint64 chunk = MIN((uint64)sizeof(tmp), remain - copied);
+
+    if(copyin(p->pagetable, tmp, base + first_len + copied, chunk) < 0 ||
+       copyout(p->pagetable, base + copied, tmp, chunk) < 0){
       p->context_path_len = 0;
       p->context_node_count = 0;
       return;
     }
+    copied += chunk;
   }
   p->context_path_len -= first_len;
   for(uint64 i = 1; i < p->context_node_count; i++){
@@ -131,7 +133,7 @@ int
 agent_sync_header(struct proc *p)
 {
   struct agent_context_header hdr;
-  char tmp[AGENT_TOOL_RESULT_MAX];
+  char tmp[128];
   uint64 n = MIN(p->context_path_len, (uint64)(sizeof(tmp) - 1));
 
   memset(&hdr, 0, sizeof(hdr));

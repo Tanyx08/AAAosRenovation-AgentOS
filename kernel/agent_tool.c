@@ -58,6 +58,10 @@ static void buf_putu(char **buf, int *left, uint64 value);
 static int param_value(const char *params, const char *key, char *out, int outsz);
 static int parse_uint_param(const char *params, const char *key, uint64 *value);
 static uint64 agent_now(void);
+static int hexval(char c);
+static void percent_decode(const char *src, char *dst, int dstsz);
+static int str_find(const char *haystack, const char *needle);
+static int read_file_content(const char *path, char *buf, int bufsz);
 
 static void
 agent_runtime_init(void)
@@ -159,6 +163,93 @@ agent_now(void)
   return ticks;
 }
 
+static int
+hexval(char c)
+{
+  if(c >= '0' && c <= '9')
+    return c - '0';
+  if(c >= 'a' && c <= 'f')
+    return c - 'a' + 10;
+  if(c >= 'A' && c <= 'F')
+    return c - 'A' + 10;
+  return -1;
+}
+
+static void
+percent_decode(const char *src, char *dst, int dstsz)
+{
+  int i = 0;
+
+  if(dstsz <= 0)
+    return;
+  while(*src && i < dstsz - 1){
+    if(src[0] == '%' && src[1] && src[2]){
+      int hi = hexval(src[1]);
+      int lo = hexval(src[2]);
+
+      if(hi >= 0 && lo >= 0){
+        dst[i++] = (char)((hi << 4) | lo);
+        src += 3;
+        continue;
+      }
+    }
+    if(*src == '+')
+      dst[i++] = ' ';
+    else
+      dst[i++] = *src;
+    src++;
+  }
+  dst[i] = 0;
+}
+
+static int
+str_find(const char *haystack, const char *needle)
+{
+  int n = strlen(needle);
+
+  if(n == 0)
+    return 0;
+  for(int i = 0; haystack[i]; i++){
+    int j;
+
+    for(j = 0; j < n && haystack[i + j] == needle[j]; j++)
+      ;
+    if(j == n)
+      return i;
+  }
+  return -1;
+}
+
+static int
+read_file_content(const char *path, char *buf, int bufsz)
+{
+  struct inode *ip;
+  int n;
+
+  if(bufsz <= 0)
+    return -1;
+  begin_op();
+  ip = namei((char*)path);
+  if(ip == 0){
+    end_op();
+    return -1;
+  }
+  ilock(ip);
+  if(ip->type != T_FILE){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+  memset(buf, 0, bufsz);
+  n = readi(ip, 0, (uint64)buf, 0, bufsz - 1);
+  iunlockput(ip);
+  end_op();
+  if(n < 0)
+    return -1;
+  buf[n] = 0;
+  return n;
+}
+
 static void
 tool_resp_set(struct agent_tool_response *resp, int status, const char *result)
 {
@@ -175,6 +266,10 @@ tool_is_builtin(const char *name)
          streq(name, "get_system_status") ||
          streq(name, "send_message") ||
          streq(name, "read_context") ||
+         streq(name, "read_file") ||
+         streq(name, "patch_file") ||
+         streq(name, "run_rule_test") ||
+         streq(name, "diff_file") ||
          streq(name, "set_file_attr") ||
          streq(name, "get_file_attr") ||
          streq(name, "del_file_attr") ||
@@ -259,14 +354,21 @@ tool_send_message(struct agent_tool_request *req,
 {
   uint64 pid;
   char message[AGENT_MESSAGE_MAX];
+  int message_off;
   struct proc *target = 0;
   uint64 now;
 
-  if(parse_uint_param(req->params, "target_pid", &pid) < 0 ||
-     param_value(req->params, "message", message, sizeof(message)) < 0){
+  if(parse_uint_param(req->params, "target_pid", &pid) < 0){
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "bad params");
     return;
   }
+  message_off = str_find(req->params, "message=");
+  if(message_off < 0){
+    tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "bad params");
+    return;
+  }
+  safestrcpy(message, req->params + message_off + strlen("message="),
+             sizeof(message));
   for(struct proc *p = proc; p < &proc[NPROC]; p++){
     if(p->pid == pid && p->state != UNUSED){
       target = p;
@@ -280,8 +382,7 @@ tool_send_message(struct agent_tool_request *req,
   now = ticks;
   acquire(&target->lock);
   safestrcpy(target->agent_message, message, sizeof(target->agent_message));
-  if(target->watch_mask & AGENT_WATCH_MESSAGE)
-    agent_signal_event_locked(target, AGENT_EVENT_MESSAGE, now);
+  agent_signal_event_locked(target, AGENT_EVENT_MESSAGE, now);
   release(&target->lock);
   tool_resp_set(resp, AGENT_TOOL_OK, "message delivered");
 }
@@ -304,6 +405,253 @@ tool_read_context(struct proc *p, struct agent_tool_response *resp)
   }
   tmp[n] = 0;
   tool_resp_set(resp, AGENT_TOOL_OK, tmp);
+}
+
+static void
+tool_read_file(struct agent_tool_request *req,
+               struct agent_tool_response *resp)
+{
+  char path[64];
+  char content[AGENT_TOOL_RESULT_MAX];
+  char buf[AGENT_TOOL_RESULT_MAX];
+  char *ptr = buf;
+  int left = sizeof(buf);
+  int n;
+
+  if(param_value(req->params, "path", path, sizeof(path)) < 0){
+    tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "bad params");
+    return;
+  }
+  n = read_file_content(path, content, sizeof(content));
+  if(n < 0){
+    tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "file not found");
+    return;
+  }
+  memset(buf, 0, sizeof(buf));
+  buf_puts(&ptr, &left, "{status=ok,path=");
+  buf_puts(&ptr, &left, path);
+  buf_puts(&ptr, &left, ",content=");
+  buf_puts(&ptr, &left, content);
+  buf_putc(&ptr, &left, '}');
+  tool_resp_set(resp, AGENT_TOOL_OK, buf);
+}
+
+static void
+tool_patch_file(struct agent_tool_request *req,
+                struct agent_tool_response *resp)
+{
+  char path[64];
+  char op[16];
+  char old_enc[AGENT_TOOL_PARAM_MAX];
+  char new_enc[AGENT_TOOL_PARAM_MAX];
+  char old[AGENT_TOOL_PARAM_MAX];
+  char newtext[AGENT_TOOL_PARAM_MAX];
+  char *srcbuf;
+  char *dstbuf;
+  struct inode *ip;
+  int off;
+  int size;
+  int oldlen;
+  int newlen;
+  int outlen;
+  uint dev;
+  uint inum;
+
+  if(param_value(req->params, "path", path, sizeof(path)) < 0 ||
+     param_value(req->params, "op", op, sizeof(op)) < 0 ||
+     param_value(req->params, "old", old_enc, sizeof(old_enc)) < 0 ||
+     param_value(req->params, "new", new_enc, sizeof(new_enc)) < 0){
+    tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "bad params");
+    return;
+  }
+  if(!streq(op, "replace")){
+    tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "unsupported patch op");
+    return;
+  }
+  percent_decode(old_enc, old, sizeof(old));
+  percent_decode(new_enc, newtext, sizeof(newtext));
+  oldlen = strlen(old);
+  newlen = strlen(newtext);
+  if(oldlen == 0){
+    tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "empty old pattern");
+    return;
+  }
+  srcbuf = kalloc();
+  dstbuf = kalloc();
+  if(srcbuf == 0 || dstbuf == 0){
+    if(srcbuf)
+      kfree(srcbuf);
+    if(dstbuf)
+      kfree(dstbuf);
+    tool_resp_set(resp, AGENT_TOOL_ERR_NO_SPACE, "no memory");
+    return;
+  }
+
+  begin_op();
+  ip = namei(path);
+  if(ip == 0){
+    end_op();
+    kfree(srcbuf);
+    kfree(dstbuf);
+    tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "file not found");
+    return;
+  }
+  ilock(ip);
+  if(ip->type != T_FILE || ip->size >= PGSIZE - 1){
+    iunlockput(ip);
+    end_op();
+    kfree(srcbuf);
+    kfree(dstbuf);
+    tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "file too large or invalid");
+    return;
+  }
+  size = readi(ip, 0, (uint64)srcbuf, 0, ip->size);
+  if(size < 0){
+    iunlockput(ip);
+    end_op();
+    kfree(srcbuf);
+    kfree(dstbuf);
+    tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "read failed");
+    return;
+  }
+  srcbuf[size] = 0;
+  off = str_find(srcbuf, old);
+  if(off < 0){
+    iunlockput(ip);
+    end_op();
+    kfree(srcbuf);
+    kfree(dstbuf);
+    tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "pattern not found");
+    return;
+  }
+  outlen = off + newlen + (size - off - oldlen);
+  if(outlen >= PGSIZE - 1){
+    iunlockput(ip);
+    end_op();
+    kfree(srcbuf);
+    kfree(dstbuf);
+    tool_resp_set(resp, AGENT_TOOL_ERR_NO_SPACE, "patched file too large");
+    return;
+  }
+  memmove(dstbuf, srcbuf, off);
+  memmove(dstbuf + off, newtext, newlen);
+  memmove(dstbuf + off + newlen, srcbuf + off + oldlen, size - off - oldlen);
+  dstbuf[outlen] = 0;
+
+  itrunc(ip);
+  if(writei(ip, 0, (uint64)dstbuf, 0, outlen) != outlen){
+    iunlockput(ip);
+    end_op();
+    kfree(srcbuf);
+    kfree(dstbuf);
+    tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "write failed");
+    return;
+  }
+  memset(ip->summary, 0, sizeof(ip->summary));
+  size = readi(ip, 0, (uint64)ip->summary, 0, sizeof(ip->summary) - 1);
+  if(size < 0)
+    size = 0;
+  ip->summary[size] = 0;
+  iupdate(ip);
+  dev = ip->dev;
+  inum = ip->inum;
+  iunlockput(ip);
+  end_op();
+
+  agentfs_content_changed();
+  agent_notify_file_modified(dev, inum);
+  kfree(srcbuf);
+  kfree(dstbuf);
+  tool_resp_set(resp, AGENT_TOOL_OK, "{status=ok,op=replace}");
+}
+
+static void
+tool_run_rule_test(struct agent_tool_request *req,
+                   struct agent_tool_response *resp)
+{
+  char target[32];
+  char todo[AGENT_TOOL_RESULT_MAX];
+  char testsrc[AGENT_TOOL_RESULT_MAX];
+  char buf[AGENT_TOOL_RESULT_MAX];
+  char *ptr = buf;
+  int left = sizeof(buf);
+  int pass_count = 0;
+  int total = 3;
+
+  if(param_value(req->params, "target", target, sizeof(target)) < 0){
+    tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "bad params");
+    return;
+  }
+  if(!streq(target, "todo_delete")){
+    tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "unknown test target");
+    return;
+  }
+  if(read_file_content("repo/todo.c", todo, sizeof(todo)) < 0 ||
+     read_file_content("repo/test.c", testsrc, sizeof(testsrc)) < 0){
+    tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "test files unavailable");
+    return;
+  }
+  memset(buf, 0, sizeof(buf));
+  buf_puts(&ptr, &left, "{status=ok,target=todo_delete,checks=[");
+  if(str_find(todo, "task_count--;") >= 0){
+    buf_puts(&ptr, &left, "task_count--:PASS");
+    pass_count++;
+  } else {
+    buf_puts(&ptr, &left, "task_count--:FAIL");
+  }
+  buf_putc(&ptr, &left, ',');
+  if(str_find(todo, "delete_task") >= 0){
+    buf_puts(&ptr, &left, "delete_task:PASS");
+    pass_count++;
+  } else {
+    buf_puts(&ptr, &left, "delete_task:FAIL");
+  }
+  buf_putc(&ptr, &left, ',');
+  if(str_find(testsrc, "delete_task") >= 0){
+    buf_puts(&ptr, &left, "test_case:PASS");
+    pass_count++;
+  } else {
+    buf_puts(&ptr, &left, "test_case:FAIL");
+  }
+  buf_puts(&ptr, &left, "],passed=");
+  buf_putu(&ptr, &left, pass_count);
+  buf_puts(&ptr, &left, ",total=");
+  buf_putu(&ptr, &left, total);
+  buf_putc(&ptr, &left, '}');
+  tool_resp_set(resp, pass_count == total ? AGENT_TOOL_OK : AGENT_TOOL_ERR_BAD_PARAM, buf);
+}
+
+static void
+tool_diff_file(struct agent_tool_request *req,
+               struct agent_tool_response *resp)
+{
+  char path[64];
+  char content[AGENT_TOOL_RESULT_MAX];
+  char buf[AGENT_TOOL_RESULT_MAX];
+  char *ptr = buf;
+  int left = sizeof(buf);
+
+  if(param_value(req->params, "path", path, sizeof(path)) < 0){
+    tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "bad params");
+    return;
+  }
+  if(read_file_content(path, content, sizeof(content)) < 0){
+    tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "file not found");
+    return;
+  }
+  memset(buf, 0, sizeof(buf));
+  buf_puts(&ptr, &left, "{status=ok,path=");
+  buf_puts(&ptr, &left, path);
+  buf_puts(&ptr, &left, ",diff=");
+  if(str_find(content, "task_count--;") >= 0){
+    buf_puts(&ptr, &left, "- // BUG: missing task_count-- | + task_count--;");
+  } else if(str_find(content, "missing task_count--") >= 0){
+    buf_puts(&ptr, &left, "unchanged bug marker still present");
+  } else {
+    buf_puts(&ptr, &left, "no known diff signature");
+  }
+  buf_putc(&ptr, &left, '}');
+  tool_resp_set(resp, AGENT_TOOL_OK, buf);
 }
 
 static void
@@ -400,6 +748,14 @@ agent_tool_call(struct proc *p, struct agent_tool_request *req,
     tool_send_message(req, resp);
   } else if(streq(req->tool, "read_context")){
     tool_read_context(p, resp);
+  } else if(streq(req->tool, "read_file")){
+    tool_read_file(req, resp);
+  } else if(streq(req->tool, "patch_file")){
+    tool_patch_file(req, resp);
+  } else if(streq(req->tool, "run_rule_test")){
+    tool_run_rule_test(req, resp);
+  } else if(streq(req->tool, "diff_file")){
+    tool_diff_file(req, resp);
   } else if(streq(req->tool, "set_file_attr")){
     agentfs_tool_set_file_attr(req, resp);
   } else if(streq(req->tool, "get_file_attr")){
@@ -537,6 +893,8 @@ agent_copy_tool_list(struct proc *p, uint64 dst, uint64 len)
   buf_puts(&ptr, &left,
            "get_system_status();query_process(type);"
            "send_message(target_pid,message);read_context();"
+           "read_file(path);patch_file(path,op,old,new);"
+           "run_rule_test(target);diff_file(path);"
            "set_file_attr(path,key,value);get_file_attr(path,key);"
            "del_file_attr(path,key);"
            "query_file(type,owner,tags,keyword,public,mode)");

@@ -31,6 +31,16 @@ struct superblock sb;
 char zeroes[BSIZE];
 uint freeinode = 1;
 uint freeblock;
+uint all_dirs[64];
+int all_dir_count;
+
+struct path_cache_entry {
+  char path[64];
+  uint inum;
+};
+
+struct path_cache_entry path_cache[64];
+int path_cache_count;
 
 
 void balloc(int);
@@ -41,6 +51,12 @@ void rsect(uint sec, void *buf);
 uint ialloc(ushort type);
 void iappend(uint inum, void *p, int n);
 void die(const char *);
+void append_dirent(uint, const char *, uint);
+uint ensure_dir(const char *, uint);
+void cache_path(const char *, uint);
+uint lookup_path(const char *);
+void pad_directory(uint);
+void apply_agent_metadata(const char *, struct dinode *);
 
 // convert to riscv byte order
 ushort
@@ -69,7 +85,7 @@ int
 main(int argc, char *argv[])
 {
   int i, cc, fd;
-  uint rootino, inum, off;
+  uint rootino, inum;
   struct dirent de;
   char buf[BSIZE];
   struct dinode din;
@@ -116,6 +132,8 @@ main(int argc, char *argv[])
 
   rootino = ialloc(T_DIR);
   assert(rootino == ROOTINO);
+  all_dirs[all_dir_count++] = rootino;
+  cache_path("", rootino);
 
   bzero(&de, sizeof(de));
   de.inum = xshort(rootino);
@@ -128,14 +146,32 @@ main(int argc, char *argv[])
   iappend(rootino, &de, sizeof(de));
 
   for(i = 2; i < argc; i++){
-    // get rid of "user/"
     char *shortname;
+    char parentpath[64];
+    char leaf[DIRSIZ + 1];
+    char *slash;
+    uint parentino;
+
     if(strncmp(argv[i], "user/", 5) == 0)
       shortname = argv[i] + 5;
     else
       shortname = argv[i];
-    
-    assert(index(shortname, '/') == 0);
+
+    slash = strrchr(shortname, '/');
+    if(slash){
+      int dirlen = slash - shortname;
+      assert(dirlen > 0 && dirlen < sizeof(parentpath));
+      memcpy(parentpath, shortname, dirlen);
+      parentpath[dirlen] = 0;
+      parentino = ensure_dir(parentpath, rootino);
+      strncpy(leaf, slash + 1, sizeof(leaf) - 1);
+      leaf[sizeof(leaf) - 1] = 0;
+    } else {
+      parentpath[0] = 0;
+      parentino = rootino;
+      strncpy(leaf, shortname, sizeof(leaf) - 1);
+      leaf[sizeof(leaf) - 1] = 0;
+    }
 
     if((fd = open(argv[i], 0)) < 0)
       die(argv[i]);
@@ -144,15 +180,15 @@ main(int argc, char *argv[])
     // The binaries are named _rm, _cat, etc. to keep the
     // build operating system from trying to execute them
     // in place of system binaries like rm and cat.
-    if(shortname[0] == '_')
-      shortname += 1;
+    if(leaf[0] == '_')
+      memmove(leaf, leaf + 1, strlen(leaf));
 
     inum = ialloc(T_FILE);
+    rinode(inum, &din);
+    apply_agent_metadata(shortname, &din);
+    winode(inum, &din);
 
-    bzero(&de, sizeof(de));
-    de.inum = xshort(inum);
-    strncpy(de.name, shortname, DIRSIZ);
-    iappend(rootino, &de, sizeof(de));
+    append_dirent(parentino, leaf, inum);
 
     while((cc = read(fd, buf, sizeof(buf))) > 0)
       iappend(inum, buf, cc);
@@ -160,12 +196,8 @@ main(int argc, char *argv[])
     close(fd);
   }
 
-  // fix size of root inode dir
-  rinode(rootino, &din);
-  off = xint(din.size);
-  off = ((off/BSIZE) + 1) * BSIZE;
-  din.size = xint(off);
-  winode(rootino, &din);
+  for(i = 0; i < all_dir_count; i++)
+    pad_directory(all_dirs[i]);
 
   balloc(freeblock);
 
@@ -291,6 +323,147 @@ iappend(uint inum, void *xp, int n)
   }
   din.size = xint(off);
   winode(inum, &din);
+}
+
+void
+append_dirent(uint dirino, const char *name, uint inum)
+{
+  struct dirent de;
+
+  bzero(&de, sizeof(de));
+  de.inum = xshort(inum);
+  strncpy(de.name, name, DIRSIZ);
+  iappend(dirino, &de, sizeof(de));
+}
+
+uint
+lookup_path(const char *path)
+{
+  int i;
+
+  for(i = 0; i < path_cache_count; i++){
+    if(strcmp(path_cache[i].path, path) == 0)
+      return path_cache[i].inum;
+  }
+  return 0;
+}
+
+void
+cache_path(const char *path, uint inum)
+{
+  assert(path_cache_count < sizeof(path_cache) / sizeof(path_cache[0]));
+  strncpy(path_cache[path_cache_count].path, path,
+          sizeof(path_cache[path_cache_count].path) - 1);
+  path_cache[path_cache_count].path[
+    sizeof(path_cache[path_cache_count].path) - 1] = 0;
+  path_cache[path_cache_count].inum = inum;
+  path_cache_count++;
+}
+
+uint
+ensure_dir(const char *path, uint rootino)
+{
+  char temp[64];
+  char current[64];
+  char *save = 0;
+  char *name;
+  uint parent = rootino;
+
+  if(path[0] == 0)
+    return rootino;
+
+  strncpy(temp, path, sizeof(temp) - 1);
+  temp[sizeof(temp) - 1] = 0;
+  current[0] = 0;
+
+  for(name = strtok_r(temp, "/", &save); name; name = strtok_r(0, "/", &save)){
+    uint found;
+    uint inum;
+
+    if(current[0]){
+      strncat(current, "/", sizeof(current) - strlen(current) - 1);
+      strncat(current, name, sizeof(current) - strlen(current) - 1);
+    } else {
+      strncpy(current, name, sizeof(current) - 1);
+      current[sizeof(current) - 1] = 0;
+    }
+
+    found = lookup_path(current);
+    if(found){
+      parent = found;
+      continue;
+    }
+
+    inum = ialloc(T_DIR);
+    all_dirs[all_dir_count++] = inum;
+    append_dirent(parent, name, inum);
+    append_dirent(inum, ".", inum);
+    append_dirent(inum, "..", parent);
+    cache_path(current, inum);
+    parent = inum;
+  }
+
+  return parent;
+}
+
+void
+pad_directory(uint inum)
+{
+  struct dinode din;
+  uint off;
+
+  rinode(inum, &din);
+  off = xint(din.size);
+  off = ((off / BSIZE) + 1) * BSIZE;
+  din.size = xint(off);
+  winode(inum, &din);
+}
+
+static void
+set_attr(struct dinode *din, const char *key, const char *value)
+{
+  int idx = din->attr_count;
+
+  assert(idx < INODE_ATTR_MAX);
+  strncpy(din->attrs[idx].key, key, sizeof(din->attrs[idx].key) - 1);
+  din->attrs[idx].key[sizeof(din->attrs[idx].key) - 1] = 0;
+  strncpy(din->attrs[idx].value, value, sizeof(din->attrs[idx].value) - 1);
+  din->attrs[idx].value[sizeof(din->attrs[idx].value) - 1] = 0;
+  din->attr_count++;
+}
+
+void
+apply_agent_metadata(const char *path, struct dinode *din)
+{
+  memset(din->summary, 0, sizeof(din->summary));
+  memset(din->attrs, 0, sizeof(din->attrs));
+  din->attr_count = 0;
+
+  if(strcmp(path, "repo/todo.c") == 0){
+    snprintf(din->summary, sizeof(din->summary), "%s",
+             "todo list implementation, delete_task may keep wrong task_count");
+    set_attr(din, "type", "code");
+    set_attr(din, "module", "todo");
+    set_attr(din, "tag", "delete");
+  } else if(strcmp(path, "repo/todo.h") == 0){
+    snprintf(din->summary, sizeof(din->summary), "%s",
+             "todo public APIs: add_task, delete_task, count_tasks");
+    set_attr(din, "type", "code");
+    set_attr(din, "module", "todo");
+    set_attr(din, "tag", "api");
+  } else if(strcmp(path, "repo/test.c") == 0){
+    snprintf(din->summary, sizeof(din->summary), "%s",
+             "tests for add_task, delete_task and count_tasks");
+    set_attr(din, "type", "test");
+    set_attr(din, "module", "todo");
+    set_attr(din, "tag", "delete");
+  } else if(strcmp(path, "repo/README") == 0){
+    snprintf(din->summary, sizeof(din->summary), "%s",
+             "todo app should update task count after delete");
+    set_attr(din, "type", "doc");
+    set_attr(din, "module", "todo");
+    set_attr(din, "tag", "requirement");
+  }
 }
 
 void

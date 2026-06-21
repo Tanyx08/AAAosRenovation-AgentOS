@@ -157,6 +157,7 @@ void agentfs_tool_del_file_attr(struct agent_tool_request *req,
                                 struct agent_tool_response *resp);
 void agentfs_tool_query_file(struct proc *p, struct agent_tool_request *req,
                              struct agent_tool_response *resp);
+void agentfs_content_changed(void);
 void agent_signal_filemod(void);
 void agent_signal_event_locked(struct proc *p, int event, uint64 now);
 int agent_schedule_score(struct proc *p, uint64 now);

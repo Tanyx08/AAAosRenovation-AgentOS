@@ -199,6 +199,11 @@ UPROGS=\
 	$U/_agentfsbench\
 	$U/_agentlooptest\
 	$U/_agentinnovationtest\
+	$U/_planner_agent\
+	$U/_retriever_agent\
+	$U/_patch_agent\
+	$U/_test_agent\
+	$U/_reviewer_agent\
 
 
 
@@ -269,6 +274,12 @@ UEXTRA=
 ifeq ($(LAB),util)
 	UEXTRA += user/xargstest.sh
 endif
+
+UEXTRA += \
+	repo/todo.c \
+	repo/todo.h \
+	repo/test.c \
+	repo/README
 
 
 fs.img: mkfs/mkfs README $(UEXTRA) $(UPROGS)

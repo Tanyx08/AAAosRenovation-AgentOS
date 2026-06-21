@@ -72,7 +72,8 @@ usertrap(void)
     // ok
   } else if(r_scause() == 13 || r_scause() == 15) {
     if(mmap_handler(r_stval(), r_scause())<0){
-      printf("page fault\n");
+      printf("page fault pid=%d sepc=%p stval=%p usp=%p\n",
+             p->pid, r_sepc(), r_stval(), p->trapframe->sp);
       p->killed = 1;
     }
   } else {
