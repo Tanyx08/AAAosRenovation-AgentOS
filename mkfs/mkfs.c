@@ -439,7 +439,13 @@ apply_agent_metadata(const char *path, struct dinode *din)
   memset(din->attrs, 0, sizeof(din->attrs));
   din->attr_count = 0;
 
-  if(strcmp(path, "repo/todo.c") == 0){
+  if(strcmp(path, "repo/main.c") == 0){
+    snprintf(din->summary, sizeof(din->summary), "%s",
+             "todo app entry point using add_task, delete_task and list_tasks");
+    set_attr(din, "type", "code");
+    set_attr(din, "module", "todo");
+    set_attr(din, "tag", "entry");
+  } else if(strcmp(path, "repo/todo.c") == 0){
     snprintf(din->summary, sizeof(din->summary), "%s",
              "todo list implementation, delete_task may keep wrong task_count");
     set_attr(din, "type", "code");

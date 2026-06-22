@@ -1,4 +1,5 @@
 #include "todo.h"
+#include <stdio.h>
 #include <string.h>
 
 #define MAX_TASKS 16
@@ -36,4 +37,13 @@ int
 count_tasks(void)
 {
   return task_count;
+}
+
+void
+list_tasks(void)
+{
+  int i;
+
+  for(i = 0; i < task_count; i++)
+    printf("%d: %s\n", i, tasks[i]);
 }

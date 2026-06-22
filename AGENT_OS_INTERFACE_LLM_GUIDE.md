@@ -817,6 +817,63 @@ qemu.send("x")
 
 如果暂时没有 `agent_loop`，可以先运行 `agenttest` 和 `agentlooptest` 展示内核能力。
 
+### 当前仓库的 Task 6 LLM Bridge
+
+当前仓库已经提供了一个更贴近任务六 CodeLab 场景的最小桥接实现：
+
+```text
+user/llm_bridge.c
+tools/llm_proxy.py
+```
+
+xv6 侧 `llm_bridge` 负责输出紧凑串口协议：
+
+```text
+@@AGENTOS_LLM_REQ id=... role=planner prompt=... @@END
+@@AGENTOS_LLM_RESP id=... state=done ... @@END
+```
+
+宿主机侧 `tools/llm_proxy.py` 负责解析请求并生成响应。当前支持：
+
+```bash
+python3 tools/llm_proxy.py --mode demo
+python3 tools/llm_proxy.py --mode api --api-key <key> --model <model> --api-url <url>
+```
+
+`--mode demo` 使用确定性规则响应，适合无网络答辩演示；`--mode api` 会调用第三方 OpenAI-compatible HTTP API，不放入 xv6 内核或 xv6 用户态。
+
+推荐把第三方 API 配置放在宿主机环境变量中：
+
+```bash
+export AGENTOS_LLM_API_KEY="你的第三方 API key"
+export AGENTOS_LLM_MODEL="你的模型名称"
+export AGENTOS_LLM_API_URL="第三方 chat completions URL"
+python3 tools/llm_proxy.py --mode api
+```
+
+如果要自动驱动 QEMU 串口，不手工复制 `@@AGENTOS_LLM_REQ/RESP`，使用：
+
+```bash
+python3 tools/llm_qemu_driver.py --mode demo
+python3 tools/llm_qemu_driver.py --mode api
+```
+
+`llm_qemu_driver.py` 会启动 `make qemu CPUS=1`，在 xv6 shell 中运行 `planner_agent llm-api`，捕获 Planner 发出的 bridge 请求，调用宿主机 proxy 逻辑，再把响应写回 QEMU。Planner 会根据 `action=start_codelab` 或 `action=abort` 决定是否启动 CodeLab 修复链路。
+
+由于 xv6 console 单行输入缓冲较小，proxy 返回给 `llm_bridge` 的响应应保持短格式，例如：
+
+```text
+@@AGENTOS_LLM_RESP id=2 state=done text=plan_patch_test action=start_codelab @@END
+```
+
+任务六主场景的切换方式：
+
+```text
+planner_agent          # 默认规则模型，完全离线
+planner_agent llm-demo # 打印 LLM bridge 请求/响应，执行仍走稳定规则链
+planner_agent llm-api  # 真实 API 路线提示，API 代码在宿主机 proxy 中补
+```
+
 ## 16. LLM Prompt 示例
 
 给 LLM 的系统提示可以写成：

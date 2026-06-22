@@ -204,6 +204,8 @@ UPROGS=\
 	$U/_patch_agent\
 	$U/_test_agent\
 	$U/_reviewer_agent\
+	$U/_rule_test_tool_agent\
+	$U/_llm_bridge\
 
 
 
@@ -276,6 +278,7 @@ ifeq ($(LAB),util)
 endif
 
 UEXTRA += \
+	repo/main.c \
 	repo/todo.c \
 	repo/todo.h \
 	repo/test.c \

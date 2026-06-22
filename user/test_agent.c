@@ -135,30 +135,31 @@ main(void)
 
   if((uint64)agent_create(AGENT_TYPE_WORKER, 0, 1024) == 0)
     exit(1);
+  if(agent_sched_set(5, 4) < 0)
+    exit(1);
   agent_watch(AGENT_WATCH_MESSAGE);
   push_context_note("test boot", "waiting for planner assignment");
 
   memset(&g_event, 0, sizeof(g_event));
   if(agent_wait(1, &g_event) < 0 || (g_event.reason & AGENT_EVENT_MESSAGE) == 0)
     exit(1);
-  printf("test_agent: setup=%s\n", g_event.message);
   push_context_note("planner message", "received test setup");
   if(parse_uint_param(g_event.message, "reviewer_pid", &reviewer_pid) < 0 ||
      parse_uint_param(g_event.message, "planner_pid", &planner_pid) < 0)
     exit(1);
+  send_message_to(planner_pid, "stage=test;status=ready;sched=5/4");
 
   memset(&g_event, 0, sizeof(g_event));
   if(agent_wait(1, &g_event) < 0 || (g_event.reason & AGENT_EVENT_MESSAGE) == 0)
     exit(1);
-  printf("test_agent: patch msg=%s\n", g_event.message);
   push_context_note("patch message", "received patch completion");
 
-  call_tool("run_rule_test", "target=todo_delete", &g_resp);
-  printf("test_agent: run_rule_test=%s\n", g_resp.result);
-  push_context_note("run_rule_test", g_resp.result);
-  if(send_message_to(reviewer_pid, g_resp.result) < 0)
-    exit(1);
+  call_tool("run_rule_test_dyn", "target=todo_delete", &g_resp);
+  push_context_note("run_rule_test_dyn", g_resp.result);
   if(send_message_to(planner_pid, g_resp.result) < 0)
+    exit(1);
+  sleep(5);
+  if(send_message_to(reviewer_pid, g_resp.result) < 0)
     exit(1);
   exit(0);
 }

@@ -53,7 +53,6 @@ sys_tool_call(void)
 
   argaddr(0, &ureq);
   argaddr(1, &uresp);
-  push_off();
   req = (struct agent_tool_request*)kalloc();
   resp = (struct agent_tool_response*)kalloc();
   if(req == 0 || resp == 0){
@@ -61,11 +60,9 @@ sys_tool_call(void)
       kfree((void*)req);
     if(resp)
       kfree((void*)resp);
-    pop_off();
     return -1;
   }
   if(copyin(p->pagetable, (char*)req, ureq, sizeof(*req)) < 0){
-    pop_off();
     kfree((void*)req);
     kfree((void*)resp);
     return -1;
@@ -76,7 +73,6 @@ sys_tool_call(void)
   status = resp->status;
   if(copyout(p->pagetable, uresp, (char*)resp, sizeof(*resp)) < 0)
     status = -1;
-  pop_off();
   kfree((void*)req);
   kfree((void*)resp);
   return status;
@@ -102,21 +98,16 @@ sys_context_push(void)
   int ret;
 
   argaddr(0, &unode);
-  push_off();
   node = (struct agent_context_node*)kalloc();
-  if(node == 0){
-    pop_off();
+  if(node == 0)
     return -1;
-  }
   if(copyin(p->pagetable, (char*)node, unode, sizeof(*node)) < 0){
-    pop_off();
     kfree((void*)node);
     return -1;
   }
   node->request[sizeof(node->request) - 1] = 0;
   node->result[sizeof(node->result) - 1] = 0;
   ret = agent_context_push_node(p, node);
-  pop_off();
   kfree((void*)node);
   return ret;
 }

@@ -142,12 +142,13 @@ main(void)
 
   if((uint64)agent_create(AGENT_TYPE_WORKER, 0, 1024) == 0)
     exit(1);
+  if(agent_sched_set(8, 7) < 0)
+    exit(1);
   agent_watch(AGENT_WATCH_MESSAGE);
   push_context_note("patch boot", "waiting for planner assignment");
   memset(&g_event, 0, sizeof(g_event));
   if(agent_wait(1, &g_event) < 0 || (g_event.reason & AGENT_EVENT_MESSAGE) == 0)
     exit(1);
-  printf("patch_agent: setup=%s\n", g_event.message);
   push_context_note("planner message", "received patch setup");
 
   if(parse_uint_param(g_event.message, "test_pid", &test_pid) < 0 ||
@@ -155,11 +156,11 @@ main(void)
      param_value(g_event.message, "path", g_warm_path, sizeof(g_warm_path)) < 0){
     exit(1);
   }
+  send_message_to(planner_pid, "stage=patch;status=ready;sched=8/7");
 
   memset(&g_event, 0, sizeof(g_event));
   if(agent_wait(1, &g_event) < 0 || (g_event.reason & AGENT_EVENT_MESSAGE) == 0)
     exit(1);
-  printf("patch_agent: request=%s\n", g_event.message);
   push_context_note("retriever message", "received patch request");
 
   if(param_value(g_event.message, "path", g_path, sizeof(g_path)) < 0 ||
@@ -180,7 +181,6 @@ main(void)
   if(call_tool("patch_file", g_params, &g_resp) != AGENT_TOOL_OK){
     exit(1);
   }
-  printf("patch_agent: patch_file=%s\n", g_resp.result);
   push_context_note("patch_file", g_resp.result);
 
   if(send_message_to(test_pid, "path=repo/todo.c;status=patched") < 0){

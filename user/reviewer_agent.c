@@ -157,13 +157,14 @@ main(void)
 
   if((uint64)agent_create(AGENT_TYPE_WORKER, 0, 1024) == 0)
     exit(1);
+  if(agent_sched_set(7, 6) < 0)
+    exit(1);
   agent_watch(AGENT_WATCH_MESSAGE);
   push_context_note("reviewer boot", "waiting for planner assignment");
 
   memset(&g_event, 0, sizeof(g_event));
   if(agent_wait(1, &g_event) < 0 || (g_event.reason & AGENT_EVENT_MESSAGE) == 0)
     exit(1);
-  printf("reviewer_agent: setup=%s\n", g_event.message);
   push_context_note("planner message", "received reviewer setup");
 
   if(param_value(g_event.message, "watch", g_path, sizeof(g_path)) < 0 ||
@@ -172,6 +173,8 @@ main(void)
   if(agent_watch_file(g_path) < 0)
     exit(1);
   push_context_note("agent_watch_file", g_path);
+  send_message_to(planner_pid,
+                  "stage=reviewer;status=watching;file=repo/todo.c;sched=7/6");
 
   while(!got_filemod || !got_test){
     memset(&g_event, 0, sizeof(g_event));
@@ -179,15 +182,26 @@ main(void)
       exit(1);
     if(g_event.reason & AGENT_EVENT_FILEMOD){
       got_filemod = 1;
-      printf("reviewer_agent: filemod=%s\n", g_event.file);
       push_context_note("filemod event", g_event.file);
     }
     if(g_event.reason & AGENT_EVENT_MESSAGE){
-      got_test = 1;
-      printf("reviewer_agent: test result=%s\n", g_event.message);
-      push_context_note("test result message", "received rule test result");
-      if(contains(g_event.message, "passed=3"))
-        test_pass = 1;
+      if(contains(g_event.message, "cache_probe")){
+        if(call_tool("query_file", "type=code;module=todo;keyword=delete",
+                     &g_resp) == AGENT_TOOL_OK){
+          push_context_note("query_file reviewer cache probe", g_resp.result);
+          if(contains(g_resp.result, "cache_hit=1"))
+            send_message_to(planner_pid,
+                            "stage=reviewer;status=query_cache;cache_hit=1");
+          else
+            send_message_to(planner_pid,
+                            "stage=reviewer;status=query_cache;cache_hit=0");
+        }
+      } else {
+        got_test = 1;
+        push_context_note("test result message", "received rule test result");
+        if(contains(g_event.message, "passed=3"))
+          test_pass = 1;
+      }
     }
   }
 
@@ -196,7 +210,6 @@ main(void)
   copy_limited(g_diff_params + 5, g_path, sizeof(g_diff_params) - 5);
   if(call_tool("diff_file", g_diff_params, &g_resp) < 0)
     exit(1);
-  printf("reviewer_agent: diff=%s\n", g_resp.result);
   push_context_note("diff_file", g_resp.result);
 
   if(test_pass && contains(g_resp.result, "task_count--;")){

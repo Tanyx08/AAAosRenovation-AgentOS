@@ -8,6 +8,10 @@
 #define LLM_ACTION_MAX 128
 #define LLM_RESPONSE_MAX 256
 
+#define LLM_REQ_BEGIN "@@AGENTOS_LLM_REQ"
+#define LLM_RESP_BEGIN "@@AGENTOS_LLM_RESP"
+#define LLM_RESP_END "@@END"
+
 enum llm_request_state {
   LLM_REQ_UNUSED = 0,
   LLM_REQ_PENDING = 1,

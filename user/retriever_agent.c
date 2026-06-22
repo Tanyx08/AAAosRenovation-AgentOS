@@ -151,18 +151,21 @@ main(void)
   char path[64];
   int patch_pid;
   int planner_pid;
+  int reviewer_pid;
 
   if((uint64)agent_create(AGENT_TYPE_WORKER, 0, 1024) == 0)
+    exit(1);
+  if(agent_sched_set(8, 8) < 0)
     exit(1);
   agent_watch(AGENT_WATCH_MESSAGE);
   push_context_note("retriever boot", "waiting for planner assignment");
   memset(&g_event, 0, sizeof(g_event));
   if(agent_wait(1, &g_event) < 0 || (g_event.reason & AGENT_EVENT_MESSAGE) == 0)
     exit(1);
-  printf("retriever_agent: assignment=%s\n", g_event.message);
   push_context_note("planner message", "received retriever assignment");
 
   if(parse_uint_param(g_event.message, "patch_pid", &patch_pid) < 0 ||
+     parse_uint_param(g_event.message, "reviewer_pid", &reviewer_pid) < 0 ||
      parse_uint_param(g_event.message, "planner_pid", &planner_pid) < 0 ||
      param_value(g_event.message, "path", path, sizeof(path)) < 0){
     printf("retriever_agent: bad planner message\n");
@@ -173,18 +176,25 @@ main(void)
     printf("retriever_agent: query_file failed\n");
     exit(1);
   }
-  printf("retriever_agent: query ok\n");
   push_context_note("query_file(type=code,module=todo,keyword=delete)",
-                    "located todo.c via indexed AgentFS query");
+                    g_resp.result);
+  if(contains(g_resp.result, "cache_hit=0"))
+    send_message_to(planner_pid,
+                    "stage=retriever;status=query_cache;cache_hit=0;used_index=1;sched=8/8");
+  else
+    send_message_to(planner_pid,
+                    "stage=retriever;status=query_cache;cache_hit=unknown;sched=8/8");
+  sleep(5);
+  send_message_to(reviewer_pid, "stage=retriever;status=cache_probe");
+  sleep(10);
 
   if(call_tool("read_file", "path=repo/todo.c", &g_resp) != AGENT_TOOL_OK){
     printf("retriever_agent: read_file failed\n");
+    send_message_to(planner_pid, "stage=retriever;status=read_failed");
     exit(1);
   }
-  printf("retriever_agent: read_file ok\n");
-  if(!contains(g_resp.result, "missing task_count--")){
-    exit(1);
-  }
+  if(!contains(g_resp.result, "delete_task"))
+    send_message_to(planner_pid, "stage=retriever;status=read_truncated");
   push_context_note("read_file(path=repo/todo.c)",
                     "delete_task misses task_count--");
 
@@ -192,7 +202,6 @@ main(void)
                      "path=repo/todo.c;op=replace;old=// BUG: missing task_count--;new=task_count--%3B") < 0){
     exit(1);
   }
-  printf("retriever_agent: patch request sent\n");
   send_message_to(planner_pid, "stage=retriever;status=found_bug;file=repo/todo.c");
   push_context_note("send_message(patch)", "forwarded patch request");
   exit(0);
