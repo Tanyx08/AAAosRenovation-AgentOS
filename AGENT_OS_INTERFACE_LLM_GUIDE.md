@@ -51,6 +51,7 @@ make qemu
 agenttest
 agentlooptest
 agentfsbench
+agentperftest
 agentinnovationtest
 ```
 
@@ -60,6 +61,7 @@ agentinnovationtest
 agenttest: all tests passed
 agentlooptest: all tests passed
 agentfsbench: all tests passed
+agentperftest: all tests passed
 agentinnovationtest: all tests passed
 ```
 
@@ -649,7 +651,32 @@ agentfsbench
 agentfsbench: all tests passed
 ```
 
-### 11.4 `agentinnovationtest`
+### 11.4 `agentperftest`
+
+运行：
+
+```text
+agentperftest
+```
+
+覆盖内容：
+
+```text
+query_file 索引查询 vs mode=scan 全表扫描
+HEARTBEAT / MESSAGE / FILEMOD 唤醒延迟
+agent_wait 空闲休眠 vs 用户态轮询空转
+高低 priority/quota Worker 调度效果
+```
+
+期望结果：
+
+```text
+agentperftest: all tests passed
+```
+
+详细测试方案和输出字段见 `AGENT_PERFORMANCE_TESTS.md`。
+
+### 11.5 `agentinnovationtest`
 
 运行：
 
@@ -676,7 +703,7 @@ agentinnovationtest
 agentinnovationtest: all tests passed
 ```
 
-这三个测试基本就是最好的用户态示例。新增应用时，建议优先参考 `user/agenttest.c` 的 `call_tool()`、`make_file()`、`set_attr()`，`user/agentlooptest.c` 的 `send_message_to()`、`worker_loop()`，以及 `user/agentinnovationtest.c` 的动态工具服务写法。
+这些测试基本就是最好的用户态示例。新增应用时，建议优先参考 `user/agenttest.c` 的 `call_tool()`、`make_file()`、`set_attr()`，`user/agentlooptest.c` 的 `send_message_to()`、`worker_loop()`，`user/agentperftest.c` 的性能指标采集，以及 `user/agentinnovationtest.c` 的动态工具服务写法。
 
 ## 12. LLM 演示架构
 

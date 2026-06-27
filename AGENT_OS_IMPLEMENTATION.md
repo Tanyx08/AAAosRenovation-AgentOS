@@ -817,6 +817,7 @@ make qemu
 agenttest
 agentlooptest
 agentfsbench
+agentperftest
 agentinnovationtest
 ```
 
@@ -826,6 +827,7 @@ agentinnovationtest
 agenttest: all tests passed
 agentlooptest: all tests passed
 agentfsbench: all tests passed
+agentperftest: all tests passed
 agentinnovationtest: all tests passed
 ```
 
@@ -853,6 +855,13 @@ agentfsbench:
   批量创建带属性文件
   对比索引查询和 mode=scan 全表扫描
   验证 index_scanned 小于 full_scanned
+
+agentperftest:
+  query_file 索引查询 vs mode=scan 全表扫描
+  HEARTBEAT / MESSAGE / FILEMOD 唤醒延迟
+  agent_wait 空闲休眠 vs 用户态轮询空转
+  高低 priority/quota Worker 调度效果
+  详细方案见 AGENT_PERFORMANCE_TESTS.md
 
 agentinnovationtest:
   shared_cache_test

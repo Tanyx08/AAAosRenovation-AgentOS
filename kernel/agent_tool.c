@@ -892,12 +892,12 @@ agent_copy_tool_list(struct proc *p, uint64 dst, uint64 len)
   memset(tools, 0, sizeof(tools));
   buf_puts(&ptr, &left,
            "get_system_status();query_process(type);"
+           "query_file(type,owner,tags,keyword,public,mode);"
            "send_message(target_pid,message);read_context();"
            "read_file(path);patch_file(path,op,old,new);"
            "run_rule_test(target);diff_file(path);"
            "set_file_attr(path,key,value);get_file_attr(path,key);"
-           "del_file_attr(path,key);"
-           "query_file(type,owner,tags,keyword,public,mode)");
+           "del_file_attr(path,key)");
   agent_runtime_init();
   acquire(&agent_runtime_lock);
   for(int i = 0; i < AGENT_DYNAMIC_TOOL_MAX; i++){

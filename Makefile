@@ -197,6 +197,7 @@ UPROGS=\
 	$U/_mmaptest\
 	$U/_agenttest\
 	$U/_agentfsbench\
+	$U/_agentperftest\
 	$U/_agentlooptest\
 	$U/_agentinnovationtest\
 	$U/_planner_agent\
