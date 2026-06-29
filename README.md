@@ -540,3 +540,17 @@ ls
 9. 如果需要讲未来 LLM，运行 `planner_agent llm-demo`，展示 `@@AGENTOS_LLM_REQ/RESP` 协议。
 
 这样可以把任务四、任务五、任务六和创新点连成一条完整、清晰、可复现的演示链路。
+
+## 14. 场景功能与 AgentOS 功能对应表
+
+| 场景功能 | AgentOS 功能 |
+| --- | --- |
+| Planner-Agent 启动并规划修复流程 | Agent 进程创建、Agent Loop 心跳唤醒 |
+| Retriever-Agent 按语义查找 `todo.c` | AgentFS 属性查询、内容摘要索引、结构化查询结果 |
+| 多个 Agent 重复查询同一仓库 | Shared Query Cache，共享查询结果缓存 |
+| Patch-Agent 修改 `repo/todo.c` | Tool Call 文件操作、文件修改事件触发 |
+| Reviewer-Agent 被文件修改唤醒 | FILEMOD 事件监听、事件驱动 Agent Loop |
+| Test-Agent 调用 `run_rule_test_dyn` | 动态工具注册、Tool Router 请求转发 |
+| 不同角色设置不同优先级 | 事件感知调度、priority/quota 调度参数 |
+| Summary 输出完整执行链路 | Context Path 记录、Loop DONE 生命周期管理 |
+| `planner_agent llm-demo/llm-api` | LLM Bridge、宿主机 Proxy、串口请求/响应协议 |

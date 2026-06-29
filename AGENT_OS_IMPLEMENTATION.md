@@ -91,7 +91,7 @@ proc.c 只在进程生命周期和调度点接入 Agent 逻辑
 
 ## 4. 代码文件与模块边界
 
-核心文件职责如下：
+核心文件职责如下。拆分后的目标是让评审能够直接从文件名看出模块边界：
 
 ```text
 kernel/agent.h
@@ -148,9 +148,88 @@ user/agentlooptest.c
 user/agentinnovationtest.c
   三个创新点的集中演示测试。
 
+user/planner_agent.c, user/retriever_agent.c, user/patch_agent.c,
+user/test_agent.c, user/reviewer_agent.c, user/rule_test_tool_agent.c
+  任务六 CodeLab 综合演示：
+  主 Agent 规划，多 Agent 协作检索/修复/测试/审核，
+  并展示共享查询缓存、动态工具注册和事件感知调度。
+
+tools/llm_qemu_driver.py, tools/llm_proxy.py, user/llm_bridge.c
+  真实 LLM 接入预留与演示链路：
+  宿主机 proxy 保管 API key 和网络调用，xv6 侧只通过串口协议收发压缩决策。
+
 Makefile
   编译 agent.o、agent_context.o、agent_fs.o、agent_loop.o、
   agent_tool.o、sysagent.o 和测试程序。
+```
+
+当前实现中的三个主要创新点和代码位置如下：
+
+```text
+创新点一：跨 Agent 的共享查询缓存
+  主要文件:
+    kernel/agent_fs.c
+  关键结构/函数:
+    struct shared_query_cache
+    shared_query_cache_lookup()
+    shared_query_cache_store()
+    cache_access_allowed()
+    query_result_with_cache()
+  实现思路:
+    第一次 query_file 走 AgentFS 属性索引和摘要匹配；
+    后续相同或可共享查询先查 shared query cache；
+    命中后直接返回结构化结果，减少重复文件系统检索。
+  演示位置:
+    user/agentinnovationtest.c
+    user/retriever_agent.c + user/reviewer_agent.c
+
+创新点二：事件感知调度
+  主要文件:
+    kernel/agent_loop.c
+    kernel/proc.c
+    kernel/proc.h
+    kernel/trap.c
+  关键函数:
+    agent_event_weight()
+    agent_schedule_score()
+    agent_tick()
+    agent_proc_sched_set()
+    scheduler() 中调用 agent_schedule_score()
+  实现思路:
+    调度评分不仅看静态 priority/quota，
+    还根据 pending event 动态加权；
+    MESSAGE / FILEMOD / HEARTBEAT 拥有不同事件权重，
+    使被关键事件唤醒的 Agent 更快获得 CPU。
+  演示位置:
+    user/agentlooptest.c
+    user/agentinnovationtest.c
+    user/planner_agent.c 的角色调度参数输出
+
+创新点三：工具能力动态注册
+  主要文件:
+    kernel/agent_tool.c
+    kernel/sysagent.c
+    user/usys.pl
+    user/user.h
+  关键结构/函数:
+    struct agent_dynamic_tool
+    struct agent_dynamic_request_slot
+    dynamic_tools[]
+    dynamic_requests[]
+    agent_tool_register()
+    agent_dynamic_tool_call()
+    agent_tool_recv()
+    agent_tool_reply()
+    agent_tool_cleanup_proc()
+  实现思路:
+    用户态工具服务进程运行时注册工具名；
+    其他 Agent 调用 tool_call 时，内核 Tool Router 将请求转发给工具进程；
+    工具进程处理后 reply，调用方获得统一格式结果。
+    工具进程退出时，内核清理 dynamic_tools 和未完成请求，避免悬空工具。
+  演示位置:
+    user/agentinnovationtest.c 的 summarize_log
+    user/rule_test_tool_agent.c 的 run_rule_test_dyn
+    user/test_agent.c 通过动态工具完成规则测试
 ```
 
 其中当前 Agent 内核模块和赛题任务的对应关系可以直接概括为：
