@@ -10,16 +10,6 @@
 
 具体赛题要求请看文档**proj61赛题说明.md**
 
-## 说明文档
-
-具体代码说明文档请看文档**AGENT_OS_IMPLEMENTATION.md**和**AGENT_OS_创新功能.md**
-
-创新场景CodeLab的说明请看文档**task6-CodeLab场景说明.md**
-
-性能测试说明请看文档**AGENT_PERFORMANCES_TESTS.md**
-
-运行方式请看文档**AGENT_OS_GUIDE.md**
-
 ## 功能总览
 
 | 模块 | 已实现能力 |
@@ -206,13 +196,15 @@ LLM 返回 `action=start_codelab` 后，`planner_agent llm-api` 执行同一套 
 
 ## 主要文档
 
-| 文档 | 内容 |
-| --- | --- |
-| [AGENT_OS_IMPLEMENTATION.md](AGENT_OS_IMPLEMENTATION.md) | AgentOS 实现结构和内核模块说明 |
-| [AGENT_OS_INTERFACE_LLM_GUIDE.md](AGENT_OS_INTERFACE_LLM_GUIDE.md) | 接口、测试程序、CodeLab 和 LLM 运行说明 |
-| [AGENT_PERFORMANCE_TESTS.md](AGENT_PERFORMANCE_TESTS.md) | 性能测试说明 |
-| [AGENT_IDEAS.md](AGENT_IDEAS.md) | 创新点说明 |
-| [agent功能接口.md](agent功能接口.md) | Agent 功能接口整理 |
+| 类别 | 文档 | 说明 |
+| --- | --- | --- |
+| 赛题要求 | [proj61赛题说明.md](proj61赛题说明.md) | 原始比赛题目和任务要求 |
+| 总体实现 | [AGENT_OS_IMPLEMENTATION.md](AGENT_OS_IMPLEMENTATION.md) | 目标、题目分析、系统框架、模块实现、测试情况和文件说明 |
+| 运行指南 | [AGENT_OS_GUIDE.md](AGENT_OS_GUIDE.md) | 编译运行、系统调用接口、测试程序、CodeLab 和 LLM bridge 使用方式 |
+| 创新功能 | [AGENT_OS_创新功能.md](AGENT_OS_创新功能.md) | Shared Query Cache、事件感知调度、动态工具注册 |
+| 性能测试 | [AGENT_PERFORMANCE_TESTS.md](AGENT_PERFORMANCE_TESTS.md) | AgentOS 性能测试点、运行方式和结果说明 |
+| 综合场景 | [task6-CodeLab场景说明.md](task6-CodeLab场景说明.md) | CodeLab 多 Agent 修复代码仓库场景 |
+| 接口速查 | [agent功能接口.md](agent功能接口.md) | AgentOS 功能接口和 syscall 速查 |
 
 ## xv6 基础说明
 
