@@ -2,7 +2,183 @@
 
 本文档说明当前仓库中已经实现的 AgentOS 代码结构、核心能力、系统调用和测试方式。文档定位是代码说明，不包含规划性内容。
 
-## 1. 实现总览
+## 1. 目标描述
+
+本项目的目标是在 xv6 教学操作系统上实现面向 Agent 的内核级运行支持，使普通用户进程能够升级为具备上下文、工具调用、事件等待和调度语义的 Agent 进程。
+
+具体目标包括：
+
+| 目标 | 实现内容 |
+| --- | --- |
+| Agent 进程抽象 | 通过 `agent_create` 建立 Agent 身份，在 PCB 中维护 Agent 类型、group、Context、事件和调度状态 |
+| Agent Context 区 | 为每个 Agent 提供 Context Path，记录工具调用、观察结果和推理路径 |
+| Tool Call 机制 | 提供统一工具调用入口，支持内置工具和动态注册工具 |
+| AgentFS 文件查询 | 扩展文件系统查询方式，使 Agent 能按属性和摘要查找文件 |
+| Agent Loop 机制 | 在内核中支持心跳、消息、文件修改事件和 `agent_wait` 睡眠/唤醒 |
+| 多 Agent 协作 | 通过消息、事件、Context 和调度机制支撑多个 Agent 协作执行任务 |
+| 综合演示 | 实现 CodeLab 场景，展示多 Agent 自动检索、修复、测试和审核代码仓库 |
+
+## 2. 比赛题目分析和相关资料调研
+
+赛题要求围绕 AgentOS 设计操作系统级能力，核心不是在用户态简单模拟 Agent，而是把 Agent 的运行状态、工具调用、文件查询和事件循环下沉到内核中管理。
+
+题目可以拆解为以下几类能力：
+
+| 题目方向 | 分析结果 | 本项目实现 |
+| --- | --- | --- |
+| Agent 进程和上下文 | Agent 需要有独立身份和可查询的运行上下文 | `kernel/agent.c`、`kernel/agent_context.c` |
+| 工具调用接口 | Agent 需要通过统一入口调用系统工具 | `kernel/agent_tool.c` |
+| 文件语义查询 | Agent 不应依赖完整路径，而应按属性和内容特征查找文件 | `kernel/agent_fs.c` |
+| Agent Loop | Agent 应在无事时休眠，被心跳或事件唤醒 | `kernel/agent_loop.c` |
+| 多 Agent 调度 | 多个 Agent 同时运行时需要合理调度 | `kernel/proc.c`、`agent_schedule_score()` |
+| 创新场景 | 需要展示 AgentOS 能支撑真实协作流程 | CodeLab 多 Agent 修复小型代码仓库 |
+
+相关资料调研主要参考了以下方向：
+
+| 调研方向 | 用于本项目的设计 |
+| --- | --- |
+| xv6 进程模型 | 在 `struct proc` 中扩展 Agent 字段，并在 `fork/exit/scheduler` 接入 Agent 逻辑 |
+| xv6 sleep/wakeup | 实现 `agent_wait`，让 Agent 在无事件时真正睡眠 |
+| xv6 syscall 机制 | 通过 `sysagent.c` 暴露 AgentOS 系统调用 |
+| xv6 文件系统与 inode | AgentFS 元数据绑定真实 inode，并维护运行时索引 |
+| 操作系统调度思想 | 在基础调度上加入 priority、quota、pending event 和 aging |
+| LLM 工具调用模式 | 将工具调用抽象为 `tool_call(req, resp)`，并支持动态工具注册 |
+
+## 3. 系统框架设计
+
+当前系统采用四层结构：
+
+```text
+用户态 Agent 应用层
+  planner_agent / retriever_agent / patch_agent / test_agent / reviewer_agent
+  agenttest / agentlooptest / agentfsbench / agentinnovationtest
+
+AgentOS 系统调用层
+  user/user.h
+  user/usys.pl
+  kernel/sysagent.c
+  kernel/syscall.c
+
+AgentOS 内核能力层
+  agent.c
+  agent_context.c
+  agent_tool.c
+  agent_fs.c
+  agent_loop.c
+
+xv6 基础内核层
+  proc.c / trap.c / fs.c / file.c / inode / pipe / console / uart
+```
+
+核心数据流如下：
+
+```text
+User Agent
+  -> agent_create / agent_wait / tool_call / query_file / context_push
+  -> sysagent.c
+  -> Agent Runtime / Tool Router / AgentFS / Context Manager / Event-aware Scheduler
+  -> xv6 proc / trap / fs / file / inode
+```
+
+CodeLab 场景中的协作流程：
+
+```text
+Planner-Agent
+  -> Retriever-Agent 查询和读取文件
+  -> Patch-Agent 修改 bug
+  -> Test-Agent 调用动态测试工具
+  -> Reviewer-Agent 监听 FILEMOD 并审核
+  -> Planner-Agent 汇总结果并进入 DONE
+```
+
+## 4. 比赛过程中的重要进展
+
+| 阶段 | 重要进展 | 对应文件 |
+| --- | --- | --- |
+| Agent 基础能力 | 实现 Agent 创建、信息查询和 PCB 字段扩展 | `kernel/agent.c`、`kernel/proc.h` |
+| Context Path | 实现上下文追加、查询、回滚、清空和容量淘汰 | `kernel/agent_context.c` |
+| Tool Call | 实现内置工具分发和结构化请求/响应 | `kernel/agent_tool.c` |
+| AgentFS | 将文件属性挂到真实 inode，建立索引并支持结构化查询 | `kernel/agent_fs.c` |
+| 查询优化 | 实现倒排索引和 shared query cache | `kernel/agent_fs.c`、`user/agentfsbench.c` |
+| Agent Loop | 实现心跳、消息事件、文件修改事件和 `agent_wait` | `kernel/agent_loop.c` |
+| 调度增强 | 实现事件感知调度评分 | `kernel/agent_loop.c`、`kernel/proc.c` |
+| 动态工具 | 实现用户态工具服务注册、接收请求和回复 | `kernel/agent_tool.c`、`user/rule_test_tool_agent.c` |
+| CodeLab 场景 | 实现多 Agent 协作修复 `/repo/todo.c` | `user/planner_agent.c` 等 |
+| LLM Bridge | 实现 xv6 用户态 bridge 与宿主机 proxy | `user/llm_bridge.c`、`tools/llm_proxy.py` |
+
+## 5. 系统测试情况
+
+当前测试覆盖功能测试、性能测试、创新点测试和综合场景测试。
+
+| 测试程序 | 覆盖内容 | 期望结果 |
+| --- | --- | --- |
+| `agenttest` | Agent 创建、Context、Tool Call、AgentFS 基础查询 | `agenttest: all tests passed` |
+| `agentlooptest` | 心跳、消息唤醒、文件修改唤醒、多 Agent 调度 | `agentlooptest: all tests passed` |
+| `agentfsbench` | AgentFS 索引查询与遍历查询性能对比 | `agentfsbench: all tests passed` |
+| `agentperftest` | Context、Tool Call、AgentFS、Agent Loop 性能指标 | 输出性能统计 |
+| `agentinnovationtest` | shared cache、事件感知调度、动态工具注册 | `agentinnovationtest: all tests passed` |
+| `planner_agent` | CodeLab 规则版多 Agent 修复流程 | 输出 summary 和 `final loop_state=5` |
+| `planner_agent llm-demo` | LLM demo bridge + CodeLab 修复流程 | 输出 LLM_REQ/RESP 和 CodeLab summary |
+
+测试命令：
+
+```text
+agenttest
+agentlooptest
+agentfsbench
+agentperftest
+agentinnovationtest
+planner_agent
+planner_agent llm-demo
+```
+
+## 6. 提交仓库目录和文件描述
+
+仓库关键目录如下：
+
+| 路径 | 描述 |
+| --- | --- |
+| `kernel/` | xv6 内核代码和 AgentOS 内核扩展 |
+| `user/` | xv6 用户态程序、测试程序和 CodeLab 多 Agent 程序 |
+| `repo/` | CodeLab 演示用小型代码仓库 |
+| `tools/` | 宿主机侧 LLM proxy 和 QEMU driver |
+| `guide/` | 综合场景设计和测试说明 |
+| `mkfs/` | xv6 文件系统镜像构建工具 |
+
+主要提交文件说明：
+
+| 文件 | 描述 |
+| --- | --- |
+| `kernel/agent.h` | AgentOS ABI、常量、结构体和函数声明 |
+| `kernel/agent.c` | Agent 核心创建、信息查询和继承逻辑 |
+| `kernel/agent_context.c` | Agent Context Path 管理 |
+| `kernel/agent_tool.c` | Tool Router、内置工具、动态工具注册 |
+| `kernel/agent_fs.c` | AgentFS 属性系统、摘要索引、查询缓存 |
+| `kernel/agent_loop.c` | Agent Loop、事件等待、心跳和调度评分 |
+| `kernel/sysagent.c` | AgentOS 系统调用入口 |
+| `kernel/proc.c`、`kernel/proc.h` | Agent PCB 字段、生命周期和调度接入 |
+| `kernel/trap.c` | 时钟 tick 驱动 Agent 心跳 |
+| `user/agenttest.c` | AgentOS 基础功能测试 |
+| `user/agentlooptest.c` | Agent Loop 和事件唤醒测试 |
+| `user/agentfsbench.c` | AgentFS 查询优化性能测试 |
+| `user/agentperftest.c` | AgentOS 性能测试 |
+| `user/agentinnovationtest.c` | 三个创新点测试 |
+| `user/planner_agent.c` | CodeLab 主控 Agent |
+| `user/retriever_agent.c` | CodeLab 检索 Agent |
+| `user/patch_agent.c` | CodeLab 修复 Agent |
+| `user/test_agent.c` | CodeLab 测试 Agent |
+| `user/reviewer_agent.c` | CodeLab 审核 Agent |
+| `user/rule_test_tool_agent.c` | 动态规则测试工具服务 |
+| `user/llm_bridge.c` | xv6 用户态 LLM bridge |
+| `tools/llm_proxy.py` | 宿主机 LLM proxy |
+| `tools/llm_qemu_driver.py` | QEMU 自动驱动脚本 |
+| `repo/main.c`、`repo/todo.c`、`repo/todo.h`、`repo/test.c` | CodeLab 演示仓库 |
+| `README.md` | 仓库总说明 |
+| `AGENT_OS_IMPLEMENTATION.md` | AgentOS 实现说明 |
+| `AGENT_OS_INTERFACE_LLM_GUIDE.md` | 接口和运行说明 |
+| `AGENT_PERFORMANCE_TESTS.md` | 性能测试说明 |
+
+## 7. 实现总览
 
 AgentOS 在 xv6 基础上增加了面向 Agent 的内核能力：
 
@@ -16,7 +192,7 @@ AgentOS 在 xv6 基础上增加了面向 Agent 的内核能力：
 | 事件感知调度 | 调度分数结合 priority、quota、pending event 和 aging |
 | CodeLab 场景 | 多 Agent 协作修复 `/repo/todo.c`，展示 AgentFS、动态工具、调度、事件和 LLM bridge |
 
-## 2. 内核模块结构
+## 8. 内核模块结构
 
 ```text
 kernel/agent.h
@@ -62,7 +238,7 @@ kernel/syscall.h, kernel/syscall.c
   Agent syscall 编号和 syscall 分发表。
 ```
 
-## 3. 用户态程序结构
+## 9. 用户态程序结构
 
 ```text
 user/agenttest.c
@@ -108,7 +284,7 @@ tools/llm_proxy.py
   宿主机 LLM proxy，支持 demo 模式和第三方 API 模式。
 ```
 
-## 4. 系统调用接口
+## 10. 系统调用接口
 
 用户态声明位于 `user/user.h`，stub 由 `user/usys.pl` 生成。
 
@@ -134,7 +310,7 @@ tools/llm_proxy.py
 | `agent_priority_set(priority)` | 设置 Agent 优先级 |
 | `agent_sched_set(priority, quota)` | 设置 Agent 调度 priority/quota |
 
-## 5. Agent 进程模型
+## 11. Agent 进程模型
 
 Agent 进程由 `agent_create()` 创建，核心状态保存在 `struct proc` 中：
 
@@ -157,7 +333,7 @@ loop_state
 
 `AGENT_TYPE_PRIMARY` 会创建新的 `agent_group`。子 Agent 通过 fork/exec 继承 group，使同组 Agent 可以共享查询缓存和默认访问同组动态工具。
 
-## 6. Context Path
+## 12. Context Path
 
 Context Path 用于记录 Agent 的执行轨迹：
 
@@ -183,7 +359,7 @@ kernel/agent_context.c
 | 清空 | `context_clear()` 清空全部路径 |
 | 淘汰 | 超过容量时 FIFO 淘汰旧节点 |
 
-## 7. Tool Call 与动态工具
+## 13. Tool Call 与动态工具
 
 Tool Call 使用结构化请求和响应。内核中的 Tool Router 位于：
 
@@ -228,7 +404,7 @@ dynamic_requests[]
 
 工具进程退出时，`agent_tool_cleanup_proc()` 会清理工具表和未完成请求。
 
-## 8. AgentFS
+## 14. AgentFS
 
 AgentFS 实现位置：
 
@@ -261,7 +437,7 @@ query_file
   -> shared_query_cache_store
 ```
 
-## 9. Agent Loop
+## 15. Agent Loop
 
 Agent Loop 实现位置：
 
@@ -290,7 +466,7 @@ WAITING
 
 `agent_wait(loop_state, event_out)` 在没有 pending event 时让 Agent 睡眠。事件到达后，内核设置 pending event 并唤醒进程。
 
-## 10. 事件感知调度
+## 16. 事件感知调度
 
 调度评分由 `agent_schedule_score()` 计算，scheduler 在 `kernel/proc.c` 中调用。
 
@@ -316,7 +492,7 @@ MESSAGE  >  FILEMOD  >  HEARTBEAT
 | Agent 仅心跳唤醒 | 周期性运行，但不会长期抢占 |
 | 普通进程等待较久 | aging 防止饥饿 |
 
-## 11. 三个创新点实现位置
+## 17. 三个创新点实现位置
 
 | 创新点 | 主要文件 | 关键实现 |
 | --- | --- | --- |
@@ -324,7 +500,7 @@ MESSAGE  >  FILEMOD  >  HEARTBEAT
 | 事件感知调度 | `kernel/agent_loop.c`、`kernel/proc.c` | `agent_event_weight`、`agent_schedule_score`、scheduler 接入 |
 | 动态工具注册 | `kernel/agent_tool.c` | `dynamic_tools`、`dynamic_requests`、`tool_register/recv/reply` |
 
-## 12. CodeLab 综合场景
+## 18. CodeLab 综合场景
 
 预置仓库位于：
 
@@ -362,7 +538,7 @@ Planner heartbeat wakeup
   -> loop_state DONE
 ```
 
-## 13. LLM Bridge
+## 19. LLM Bridge
 
 LLM bridge 由 xv6 用户态和宿主机脚本组成：
 
@@ -381,7 +557,7 @@ tools/llm_proxy.py
 
 `planner_agent llm-api` 会先通过 bridge 请求宿主机模型决策。LLM 返回 `action=start_codelab` 后，Planner 执行同一套 CodeLab 多 Agent 流程。
 
-## 14. 编译与运行
+## 20. 编译与运行
 
 在宿主机执行：
 
@@ -434,7 +610,7 @@ export AGENTOS_LLM_API_URL="第三方 chat completions 接口地址"
 python3 tools/llm_qemu_driver.py --mode api
 ```
 
-## 15. 预期测试结果
+## 21. 预期测试结果
 
 基础测试成功时输出：
 

@@ -8,7 +8,17 @@
 
 总体要求：在一个教学操作系统内核（如uCore 、rCore等）上，设计并实现面向AI智能体的内核功能模块（Agent-OS）。最终交付物为一套可在QEMU上运行的完整系统，包含内核代码、用户态测试程序和演示场景。
 
-具体赛题要求请看文件**proj61赛题说明.md**
+具体赛题要求请看文档**proj61赛题说明.md**
+
+## 说明文档
+
+具体代码说明文档请看文档**AGENT_OS_IMPLEMENTATION.md**和**AGENT_OS_创新功能.md**
+
+创新场景CodeLab的说明请看文档**task6-CodeLab场景说明.md**
+
+性能测试说明请看文档**AGENT_PERFORMANCES_TESTS.md**
+
+运行方式请看文档**AGENT_OS_GUIDE.md**
 
 ## 功能总览
 
