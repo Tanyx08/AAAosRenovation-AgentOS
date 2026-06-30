@@ -226,13 +226,21 @@ sys_tool_reply(void)
 {
   int request_id;
   int status;
-  char result[AGENT_TOOL_RESULT_MAX];
+  char *result;
+  int ret;
 
   argint(0, &request_id);
-  if(argstr(1, result, sizeof(result)) < 0)
+  result = kalloc();
+  if(result == 0)
     return -1;
+  if(argstr(1, result, AGENT_TOOL_RESULT_MAX) < 0){
+    kfree(result);
+    return -1;
+  }
   argint(2, &status);
-  return agent_tool_reply(myproc(), request_id, result, status);
+  ret = agent_tool_reply(myproc(), request_id, result, status);
+  kfree(result);
+  return ret;
 }
 
 uint64

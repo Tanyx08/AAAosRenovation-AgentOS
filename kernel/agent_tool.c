@@ -286,13 +286,19 @@ agent_same_group_or_public(struct proc *p, int owner_group, int flags)
 static void
 tool_get_system_status(struct agent_tool_response *resp)
 {
-  char buf[AGENT_TOOL_RESULT_MAX];
-  char *ptr = buf;
-  int left = sizeof(buf);
+  char *buf;
+  char *ptr;
+  int left = AGENT_TOOL_RESULT_MAX;
   int used = 0;
   int agents = 0;
 
-  memset(buf, 0, sizeof(buf));
+  buf = kalloc();
+  if(buf == 0){
+    tool_resp_set(resp, AGENT_TOOL_ERR_NO_SPACE, "no memory");
+    return;
+  }
+  ptr = buf;
+  memset(buf, 0, AGENT_TOOL_RESULT_MAX);
   for(struct proc *p = proc; p < &proc[NPROC]; p++){
     if(p->state != UNUSED){
       used++;
@@ -308,6 +314,7 @@ tool_get_system_status(struct agent_tool_response *resp)
   buf_putu(&ptr, &left, ticks);
   buf_putc(&ptr, &left, '}');
   tool_resp_set(resp, AGENT_TOOL_OK, buf);
+  kfree(buf);
 }
 
 static void
@@ -315,13 +322,19 @@ tool_query_process(struct agent_tool_request *req,
                    struct agent_tool_response *resp)
 {
   char type[24];
-  char buf[AGENT_TOOL_RESULT_MAX];
-  char *ptr = buf;
-  int left = sizeof(buf);
+  char *buf;
+  char *ptr;
+  int left = AGENT_TOOL_RESULT_MAX;
   int count = 0;
   int only_agent = 0;
 
-  memset(buf, 0, sizeof(buf));
+  buf = kalloc();
+  if(buf == 0){
+    tool_resp_set(resp, AGENT_TOOL_ERR_NO_SPACE, "no memory");
+    return;
+  }
+  ptr = buf;
+  memset(buf, 0, AGENT_TOOL_RESULT_MAX);
   if(param_value(req->params, "type", type, sizeof(type)) == 0 &&
      streq(type, "agent"))
     only_agent = 1;
@@ -346,6 +359,7 @@ tool_query_process(struct agent_tool_request *req,
   buf_putu(&ptr, &left, count);
   buf_putc(&ptr, &left, '}');
   tool_resp_set(resp, AGENT_TOOL_OK, buf);
+  kfree(buf);
 }
 
 static void
@@ -390,21 +404,28 @@ tool_send_message(struct agent_tool_request *req,
 static void
 tool_read_context(struct proc *p, struct agent_tool_response *resp)
 {
-  char tmp[AGENT_TOOL_RESULT_MAX];
+  char *tmp;
   uint64 path_base = p->context_region_start + sizeof(struct agent_context_header);
-  uint64 n = MIN((uint64)(sizeof(tmp) - 1), p->context_path_len);
+  uint64 n = MIN((uint64)(AGENT_TOOL_RESULT_MAX - 1), p->context_path_len);
 
   if(n == 0){
     tool_resp_set(resp, AGENT_TOOL_OK, "");
     return;
   }
+  tmp = kalloc();
+  if(tmp == 0){
+    tool_resp_set(resp, AGENT_TOOL_ERR_NO_SPACE, "no memory");
+    return;
+  }
   if(copyin(p->pagetable, tmp, path_base + p->context_path_len - n,
             n) < 0){
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "context unavailable");
+    kfree(tmp);
     return;
   }
   tmp[n] = 0;
   tool_resp_set(resp, AGENT_TOOL_OK, tmp);
+  kfree(tmp);
 }
 
 static void
@@ -412,28 +433,43 @@ tool_read_file(struct agent_tool_request *req,
                struct agent_tool_response *resp)
 {
   char path[64];
-  char content[AGENT_TOOL_RESULT_MAX];
-  char buf[AGENT_TOOL_RESULT_MAX];
-  char *ptr = buf;
-  int left = sizeof(buf);
+  char *content;
+  char *buf;
+  char *ptr;
+  int left = AGENT_TOOL_RESULT_MAX;
   int n;
 
   if(param_value(req->params, "path", path, sizeof(path)) < 0){
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "bad params");
     return;
   }
-  n = read_file_content(path, content, sizeof(content));
+  content = kalloc();
+  buf = kalloc();
+  if(content == 0 || buf == 0){
+    if(content)
+      kfree(content);
+    if(buf)
+      kfree(buf);
+    tool_resp_set(resp, AGENT_TOOL_ERR_NO_SPACE, "no memory");
+    return;
+  }
+  n = read_file_content(path, content, AGENT_TOOL_RESULT_MAX);
   if(n < 0){
+    kfree(content);
+    kfree(buf);
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "file not found");
     return;
   }
-  memset(buf, 0, sizeof(buf));
+  ptr = buf;
+  memset(buf, 0, AGENT_TOOL_RESULT_MAX);
   buf_puts(&ptr, &left, "{status=ok,path=");
   buf_puts(&ptr, &left, path);
   buf_puts(&ptr, &left, ",content=");
   buf_puts(&ptr, &left, content);
   buf_putc(&ptr, &left, '}');
   tool_resp_set(resp, AGENT_TOOL_OK, buf);
+  kfree(content);
+  kfree(buf);
 }
 
 static void
@@ -570,11 +606,11 @@ tool_run_rule_test(struct agent_tool_request *req,
                    struct agent_tool_response *resp)
 {
   char target[32];
-  char todo[AGENT_TOOL_RESULT_MAX];
-  char testsrc[AGENT_TOOL_RESULT_MAX];
-  char buf[AGENT_TOOL_RESULT_MAX];
-  char *ptr = buf;
-  int left = sizeof(buf);
+  char *todo;
+  char *testsrc;
+  char *buf;
+  char *ptr;
+  int left = AGENT_TOOL_RESULT_MAX;
   int pass_count = 0;
   int total = 3;
 
@@ -586,12 +622,29 @@ tool_run_rule_test(struct agent_tool_request *req,
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "unknown test target");
     return;
   }
-  if(read_file_content("repo/todo.c", todo, sizeof(todo)) < 0 ||
-     read_file_content("repo/test.c", testsrc, sizeof(testsrc)) < 0){
+  todo = kalloc();
+  testsrc = kalloc();
+  buf = kalloc();
+  if(todo == 0 || testsrc == 0 || buf == 0){
+    if(todo)
+      kfree(todo);
+    if(testsrc)
+      kfree(testsrc);
+    if(buf)
+      kfree(buf);
+    tool_resp_set(resp, AGENT_TOOL_ERR_NO_SPACE, "no memory");
+    return;
+  }
+  if(read_file_content("repo/todo.c", todo, AGENT_TOOL_RESULT_MAX) < 0 ||
+     read_file_content("repo/test.c", testsrc, AGENT_TOOL_RESULT_MAX) < 0){
+    kfree(todo);
+    kfree(testsrc);
+    kfree(buf);
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "test files unavailable");
     return;
   }
-  memset(buf, 0, sizeof(buf));
+  ptr = buf;
+  memset(buf, 0, AGENT_TOOL_RESULT_MAX);
   buf_puts(&ptr, &left, "{status=ok,target=todo_delete,checks=[");
   if(str_find(todo, "task_count--;") >= 0){
     buf_puts(&ptr, &left, "task_count--:PASS");
@@ -619,6 +672,9 @@ tool_run_rule_test(struct agent_tool_request *req,
   buf_putu(&ptr, &left, total);
   buf_putc(&ptr, &left, '}');
   tool_resp_set(resp, pass_count == total ? AGENT_TOOL_OK : AGENT_TOOL_ERR_BAD_PARAM, buf);
+  kfree(todo);
+  kfree(testsrc);
+  kfree(buf);
 }
 
 static void
@@ -626,20 +682,33 @@ tool_diff_file(struct agent_tool_request *req,
                struct agent_tool_response *resp)
 {
   char path[64];
-  char content[AGENT_TOOL_RESULT_MAX];
-  char buf[AGENT_TOOL_RESULT_MAX];
-  char *ptr = buf;
-  int left = sizeof(buf);
+  char *content;
+  char *buf;
+  char *ptr;
+  int left = AGENT_TOOL_RESULT_MAX;
 
   if(param_value(req->params, "path", path, sizeof(path)) < 0){
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "bad params");
     return;
   }
-  if(read_file_content(path, content, sizeof(content)) < 0){
+  content = kalloc();
+  buf = kalloc();
+  if(content == 0 || buf == 0){
+    if(content)
+      kfree(content);
+    if(buf)
+      kfree(buf);
+    tool_resp_set(resp, AGENT_TOOL_ERR_NO_SPACE, "no memory");
+    return;
+  }
+  if(read_file_content(path, content, AGENT_TOOL_RESULT_MAX) < 0){
+    kfree(content);
+    kfree(buf);
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "file not found");
     return;
   }
-  memset(buf, 0, sizeof(buf));
+  ptr = buf;
+  memset(buf, 0, AGENT_TOOL_RESULT_MAX);
   buf_puts(&ptr, &left, "{status=ok,path=");
   buf_puts(&ptr, &left, path);
   buf_puts(&ptr, &left, ",diff=");
@@ -652,6 +721,8 @@ tool_diff_file(struct agent_tool_request *req,
   }
   buf_putc(&ptr, &left, '}');
   tool_resp_set(resp, AGENT_TOOL_OK, buf);
+  kfree(content);
+  kfree(buf);
 }
 
 static void
@@ -733,7 +804,7 @@ int
 agent_tool_call(struct proc *p, struct agent_tool_request *req,
                 struct agent_tool_response *resp)
 {
-  struct agent_context_node node;
+  struct agent_context_node *node;
 
   if(p->agent_type == AGENT_TYPE_NORMAL){
     tool_resp_set(resp, AGENT_TOOL_ERR_NOT_AGENT, "process is not agent");
@@ -768,24 +839,30 @@ agent_tool_call(struct proc *p, struct agent_tool_request *req,
     agent_dynamic_tool_call(p, req, resp);
   }
 
-  memset(&node, 0, sizeof(node));
-  node.timestamp_ms = agent_now();
-  safestrcpy(node.request, req->tool, sizeof(node.request));
+  node = (struct agent_context_node*)kalloc();
+  if(node == 0){
+    p->loop_state = AGENT_LOOP_READY;
+    return resp->status;
+  }
+  memset(node, 0, sizeof(*node));
+  node->timestamp_ms = agent_now();
+  safestrcpy(node->request, req->tool, sizeof(node->request));
   if(req->params[0]){
-    int n = strlen(node.request);
-    if(n < sizeof(node.request) - 2){
-      node.request[n] = '(';
-      safestrcpy(node.request + n + 1, req->params,
-                 sizeof(node.request) - n - 1);
-      n = strlen(node.request);
-      if(n < sizeof(node.request) - 1){
-        node.request[n] = ')';
-        node.request[n + 1] = 0;
+    int n = strlen(node->request);
+    if(n < sizeof(node->request) - 2){
+      node->request[n] = '(';
+      safestrcpy(node->request + n + 1, req->params,
+                 sizeof(node->request) - n - 1);
+      n = strlen(node->request);
+      if(n < sizeof(node->request) - 1){
+        node->request[n] = ')';
+        node->request[n + 1] = 0;
       }
     }
   }
-  safestrcpy(node.result, resp->result, sizeof(node.result));
-  agent_context_push_node(p, &node);
+  safestrcpy(node->result, resp->result, sizeof(node->result));
+  agent_context_push_node(p, node);
+  kfree((void*)node);
   p->loop_state = AGENT_LOOP_READY;
   return resp->status;
 }
@@ -884,12 +961,16 @@ agent_tool_reply(struct proc *p, int request_id, const char *result, int status)
 int
 agent_copy_tool_list(struct proc *p, uint64 dst, uint64 len)
 {
-  char tools[512];
-  char *ptr = tools;
-  int left = sizeof(tools);
+  char *tools;
+  char *ptr;
+  int left = AGENT_TOOL_RESULT_MAX;
   uint64 n;
 
-  memset(tools, 0, sizeof(tools));
+  tools = kalloc();
+  if(tools == 0)
+    return -1;
+  ptr = tools;
+  memset(tools, 0, AGENT_TOOL_RESULT_MAX);
   buf_puts(&ptr, &left,
            "get_system_status();query_process(type);"
            "query_file(type,owner,tags,keyword,public,mode);"
@@ -912,8 +993,11 @@ agent_copy_tool_list(struct proc *p, uint64 dst, uint64 len)
   release(&agent_runtime_lock);
   n = MIN((uint64)strlen(tools), len);
 
-  if(copyout(p->pagetable, dst, tools, n) < 0)
+  if(copyout(p->pagetable, dst, tools, n) < 0){
+    kfree(tools);
     return -1;
+  }
+  kfree(tools);
   return n;
 }
 

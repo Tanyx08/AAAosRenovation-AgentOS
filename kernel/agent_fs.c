@@ -586,7 +586,13 @@ static int
 shared_query_cache_lookup(struct proc *p, const char *query,
                           struct agent_tool_response *resp)
 {
-  char result[AGENT_TOOL_RESULT_MAX];
+  char *result;
+
+  result = kalloc();
+  if(result == 0){
+    tool_resp_set(resp, AGENT_TOOL_ERR_NO_SPACE, "no memory");
+    return 1;
+  }
 
   agent_fs_runtime_init();
   acquire(&agent_fs_runtime_lock);
@@ -597,13 +603,15 @@ shared_query_cache_lookup(struct proc *p, const char *query,
        !streq(entry->query, query) || !cache_access_allowed(p, entry))
       continue;
     entry->refcnt++;
-    query_result_with_cache(result, sizeof(result), entry->result, 1,
+    query_result_with_cache(result, AGENT_TOOL_RESULT_MAX, entry->result, 1,
                             entry->owner_pid, entry->refcnt, entry->version, 0);
     release(&agent_fs_runtime_lock);
     tool_resp_set(resp, AGENT_TOOL_OK, result);
+    kfree(result);
     return 1;
   }
   release(&agent_fs_runtime_lock);
+  kfree(result);
   return 0;
 }
 
@@ -728,7 +736,7 @@ agentfs_tool_get_file_attr(struct agent_tool_request *req,
                            struct agent_tool_response *resp)
 {
   char path[AGENT_FILE_PATH_MAX], key[INODE_ATTR_KEY_MAX];
-  char buf[AGENT_TOOL_RESULT_MAX];
+  char *buf;
   struct inode *ip;
 
   if(param_value(req->params, "path", path, sizeof(path)) < 0 ||
@@ -736,10 +744,16 @@ agentfs_tool_get_file_attr(struct agent_tool_request *req,
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "bad params");
     return;
   }
+  buf = kalloc();
+  if(buf == 0){
+    tool_resp_set(resp, AGENT_TOOL_ERR_NO_SPACE, "no memory");
+    return;
+  }
   begin_op();
   ip = namei(path);
   if(ip == 0){
     end_op();
+    kfree(buf);
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "file not found");
     return;
   }
@@ -747,9 +761,9 @@ agentfs_tool_get_file_attr(struct agent_tool_request *req,
   for(int i = 0; i < ip->attr_count; i++){
     if(streq(ip->attrs[i].key, key)){
       char *ptr = buf;
-      int left = sizeof(buf);
+      int left = AGENT_TOOL_RESULT_MAX;
 
-      memset(buf, 0, sizeof(buf));
+      memset(buf, 0, AGENT_TOOL_RESULT_MAX);
       buf_puts(&ptr, &left, "{status=ok,path=");
       buf_puts(&ptr, &left, path);
       buf_putc(&ptr, &left, ',');
@@ -760,11 +774,13 @@ agentfs_tool_get_file_attr(struct agent_tool_request *req,
       iunlockput(ip);
       end_op();
       tool_resp_set(resp, AGENT_TOOL_OK, buf);
+      kfree(buf);
       return;
     }
   }
   iunlockput(ip);
   end_op();
+  kfree(buf);
   tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "attr not found");
 }
 
