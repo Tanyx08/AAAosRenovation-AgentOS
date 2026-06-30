@@ -203,8 +203,8 @@ LLM 返回 `action=start_codelab` 后，`planner_agent llm-api` 执行同一套 
 | 类别 | 文档 | 说明 |
 | --- | --- | --- |
 | 赛题要求 | [proj61赛题说明.md](proj61赛题说明.md) | 原始比赛题目和任务要求 |
-| 设计文档 | [设计文档.docx](设计文档.docx) | AgentOS 功能接口和 syscall 速查 |
-| 项目PPT | [项目PPT.pptx](项目PPT.pptx) | AgentOS 功能接口和 syscall 速查 |
+| 设计文档 | [设计文档.docx](设计文档.docx) | 设计文档 |
+| 项目PPT | [项目PPT.pptx](项目PPT.pptx) | 进展汇报幻灯片 |
 | 总体实现 | [AGENT_OS_IMPLEMENTATION.md](AGENT_OS_IMPLEMENTATION.md) | 目标、题目分析、系统框架、模块实现、测试情况和文件说明 |
 | 运行指南 | [AGENT_OS_GUIDE.md](AGENT_OS_GUIDE.md) | 编译运行、系统调用接口、测试程序、CodeLab 和 LLM bridge 使用方式 |
 | 创新功能 | [AGENT_OS_创新功能.md](AGENT_OS_创新功能.md) | Shared Query Cache、事件感知调度、动态工具注册 |
