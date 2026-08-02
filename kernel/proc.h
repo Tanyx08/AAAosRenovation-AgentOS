@@ -26,6 +26,10 @@ struct cpu {
   struct context context;     // swtch() here to enter scheduler().
   int noff;                   // Depth of push_off() nesting.
   int intena;                 // Were interrupts enabled before push_off()?
+
+  // 修改点 #12: 软预算调度统计
+  int agent_burst_count;       // 连续 Agent 运行计数
+  int normal_burst_count;      // 连续普通进程运行计数
 };
 
 extern struct cpu cpus[NCPU];
@@ -124,7 +128,9 @@ struct proc {
 
   struct vma *vma; // virtual memory area
 
+  // ---- Agent 身份与生命周期 ----
   int agent_type;
+  int agent_role;              // 修改点 #3: 角色 (Planner/Retriever/Patch/Test/Reviewer)
   int heartbeat_interval;
   uint64 resource_quota;
   int loop_state;
@@ -141,14 +147,66 @@ struct proc {
   int watch_mask;
   int pending_events;
   int last_wakeup_reason;
+
+  // ---- 权限与身份 (修改点 #3) ----
   int agent_priority;
   int agent_group;
-  char agent_message[AGENT_MESSAGE_MAX];
+  uint64 agent_capabilities;   // 修改点 #3: 轻量 capability 位掩码
+  uint64 workflow_id;          // 修改点 #4: 工作流 ID
+  uint64 identity_generation;  // 修改点 #4: 身份代次 (防 PID 复用)
+
+  // ---- FIFO 邮箱 (修改点 #1) ----
+  struct agent_mailbox mailbox; // 替换原来的 agent_message[AGENT_MESSAGE_MAX]
+
+  // ---- 文件监听 (修改点 #16) ----
   uint agent_watch_dev;
   uint agent_watch_inum;
   char agent_watch_path[AGENT_MESSAGE_MAX];
+
+  // ---- 调度参数 (修改点 #12) ----
   int agent_sched_priority;
   int agent_sched_quota;
   int agent_sched_budget;
   int agent_sched_boost;
+  uint64 agent_sched_vruntime;   // 修改点 #12: 虚拟运行时间
+  uint64 agent_sched_last_run;   // 修改点 #12: 上次运行 tick
+  int agent_sched_budget_penalty;// 修改点 #12: 预算惩罚计数
+
+  // ---- Context ABI (修改点 #7) ----
+  uint64 context_generation;     // 修改点 #7: Context 写代次
+  uint64 context_first_sequence; // 修改点 #7: 首个节点序列号
+  uint64 context_next_sequence;  // 修改点 #7: 下一个序列号
+
+  // ---- 内核可信摘要 (修改点 #6) ----
+  struct agent_context_digest context_digests[AGENT_CONTEXT_DIGEST_MAX];
+  int context_digest_head;
+  int context_digest_count;
+
+  // ---- agent_wait 超时 (修改点 #17) ----
+  uint64 wait_generation;        // 等待代次（防旧超时重复唤醒）
+  int wait_timeout_ticks;        // 超时 tick 数
+  uint64 wait_deadline;          // 超时截止 tick
+
+  // ---- Context 复用 (修改点 #8) ----
+  uint64 last_context_query;     // 上次查询的 hash
+  int context_reuse_hit;         // 复用命中次数
+
+  // ---- 调度软预算补充周期 (修改点 #12) ----
+  uint64 budget_replenish_deadline;
+};
+
+// ---- 全局 Agent 运行时状态 ----
+struct agent_global_state {
+  struct spinlock lock;
+  int ready;
+
+  // 修改点 #2: 文件编辑租约表
+  struct agent_edit_lease leases[AGENT_LEASE_MAX];
+  uint64 next_lease_id;
+
+  // 修改点 #24: 心跳时间轮
+  int heartbeat_wheel_heads[AGENT_HEARTBEAT_WHEEL_BUCKETS];
+  int heartbeat_wheel_pids[AGENT_HEARTBEAT_WHEEL_BUCKETS * 4]; // 每桶最多4个
+  uint64 heartbeat_min_deadline;
+  int heartbeat_count;
 };

@@ -41,3 +41,13 @@
 #define SYS_tool_reply 40
 #define SYS_agent_watch_file 41
 #define SYS_agent_sched_set 42
+// 决赛新增 syscall (修改点 #1-#24)
+#define SYS_agent_wait_timeout 43    // 修改点 #17: agent_wait 带 timeout
+#define SYS_tool_call_batch 44      // 修改点 #22: 批量工具调用
+#define SYS_tool_schema 45          // 修改点 #14: 工具 schema 查询
+#define SYS_agent_cap_set 46        // 修改点 #3: 设置 capability
+#define SYS_agent_lease_begin 47    // 修改点 #2: 文件编辑租约 begin
+#define SYS_agent_lease_commit 48   // 修改点 #2: 文件编辑租约 commit
+#define SYS_agent_lease_abort 49    // 修改点 #2: 文件编辑租约 abort
+#define SYS_agent_query_agent 50    // 修改点 #4/#2: Agent 发现
+#define SYS_agent_role_set 51       // 修改点 #3: 设置 Agent 角色

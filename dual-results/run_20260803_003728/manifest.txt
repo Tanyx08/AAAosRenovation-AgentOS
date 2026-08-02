@@ -1,0 +1,6 @@
+commit: 218f1a347be5618fb4c265e56de64f989bb0749f
+build_time: 2026-08-03T00:37:32+08:00
+qemu_config: CPUS=3 RAM=128M
+kernel_size:  bytes
+fs_img_size: 2048000 bytes
+struct_proc_size: 

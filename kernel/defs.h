@@ -12,6 +12,13 @@ struct spinlock;
 struct sleeplock;
 struct stat;
 struct superblock;
+struct agent_tool_batch_request;
+struct agent_tool_batch_response;
+struct agent_tool_schema;
+struct agent_mailbox;
+struct agent_message;
+struct agent_context_digest;
+struct agent_global_state;
 #ifdef LAB_NET
 struct mbuf;
 struct sock;
@@ -230,6 +237,31 @@ int             snprintf(char*, int, char*, ...);
 #ifdef KCSAN
 void            kcsaninit();
 #endif
+
+// ---- AgentOS 决赛新增声明 (修改点 #1-#24) ----
+void            agent_send_message(struct proc*, int, int, const char*, uint64);
+int             agent_query_agent(struct proc*, int, int, int, uint64, uint64);
+int             agent_proc_cap_set(struct proc*, uint64);
+void            agent_trace(struct proc*, const char*, int, const char*);
+void            agent_trace_span(struct proc*, uint64, uint64, const char*, int, const char*);
+void            agent_audit_record(struct proc*, uint64, const char*, int, int, const char*);
+int             agent_tool_schema_get(struct proc*, const char*, struct agent_tool_schema*);
+int             agent_tool_schema_list(struct proc*, uint64, uint64);
+int             agent_tool_call_batch(struct proc*, struct agent_tool_batch_request*, struct agent_tool_batch_response*);
+int             agent_lease_begin(struct proc*, const char*, uint64*, uint64*);
+int             agent_lease_commit(struct proc*, uint64, uint64);
+int             agent_lease_abort(struct proc*, uint64);
+void            agent_lease_reap_expired(uint64);
+void            agent_lease_reap_pid(int);
+int             agent_context_digest_verify(struct proc*);
+uint64          agent_role_default_caps(int);
+int             agent_check_tool_permission(struct proc*, const char*);
+void            agent_context_digest_push(struct proc*, uint64, uint64, const char*, const char*, int);
+void            buf_putc_s(char**, int*, char);
+void            buf_puts_s(char**, int*, const char*);
+void            buf_putu_s(char**, int*, uint64);
+int             agent_needs_sched_boost(struct proc*);
+int             agent_proc_wait(struct proc*, int, uint64, int);
 
 #ifdef LAB_NET
 // pci.c

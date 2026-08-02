@@ -122,6 +122,15 @@ extern uint64 sys_tool_recv(void);
 extern uint64 sys_tool_reply(void);
 extern uint64 sys_agent_watch_file(void);
 extern uint64 sys_agent_sched_set(void);
+extern uint64 sys_agent_wait_timeout(void);
+extern uint64 sys_tool_call_batch(void);
+extern uint64 sys_tool_schema(void);
+extern uint64 sys_agent_cap_set(void);
+extern uint64 sys_agent_lease_begin(void);
+extern uint64 sys_agent_lease_commit(void);
+extern uint64 sys_agent_lease_abort(void);
+extern uint64 sys_agent_query_agent(void);
+extern uint64 sys_agent_role_set(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -168,6 +177,15 @@ static uint64 (*syscalls[])(void) = {
 [SYS_tool_reply] sys_tool_reply,
 [SYS_agent_watch_file] sys_agent_watch_file,
 [SYS_agent_sched_set] sys_agent_sched_set,
+[SYS_agent_wait_timeout] sys_agent_wait_timeout,
+[SYS_tool_call_batch] sys_tool_call_batch,
+[SYS_tool_schema] sys_tool_schema,
+[SYS_agent_cap_set] sys_agent_cap_set,
+[SYS_agent_lease_begin] sys_agent_lease_begin,
+[SYS_agent_lease_commit] sys_agent_lease_commit,
+[SYS_agent_lease_abort] sys_agent_lease_abort,
+[SYS_agent_query_agent] sys_agent_query_agent,
+[SYS_agent_role_set] sys_agent_role_set,
 };
 
 void
