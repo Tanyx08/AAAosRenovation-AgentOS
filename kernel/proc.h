@@ -131,6 +131,7 @@ struct proc {
   // ---- Agent 身份与生命周期 ----
   int agent_type;
   int agent_role;              // 修改点 #3: 角色 (Planner/Retriever/Patch/Test/Reviewer)
+  int agent_role_locked;       // 角色只允许在创建阶段设置一次
   int heartbeat_interval;
   uint64 resource_quota;
   int loop_state;
@@ -203,6 +204,7 @@ struct agent_global_state {
   // 修改点 #2: 文件编辑租约表
   struct agent_edit_lease leases[AGENT_LEASE_MAX];
   uint64 next_lease_id;
+  uint64 next_identity_generation;
 
   // 修改点 #24: 心跳时间轮
   int heartbeat_wheel_heads[AGENT_HEARTBEAT_WHEEL_BUCKETS];

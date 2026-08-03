@@ -76,6 +76,8 @@ main(int argc, char **argv)
   char context[768];
   char *ctx;
   int n;
+  int child;
+  int status;
 
   (void)argc;
   (void)argv;
@@ -94,8 +96,23 @@ main(int argc, char **argv)
 
   hdr = (struct agent_context_header*)ctx;
   check(hdr->magic == AGENT_CONTEXT_HEADER_MAGIC, "context header readable");
+  check(hdr->version == AGENT_CONTEXT_HEADER_VERSION &&
+          hdr->header_size == sizeof(*hdr) &&
+          hdr->node_size == sizeof(struct agent_context_node) &&
+          (hdr->generation & 1) == 0,
+        "context ABI v2 stable header");
   ctx[hdr->path_offset] = 'A';
   ctx[info.context_size - 1] = 'Z';
+
+  child = fork();
+  if(child == 0){
+    volatile char *guard = ctx + AGENT_CONTEXT_REGION_SIZE;
+    *guard = 'X';
+    exit(0);
+  }
+  status = 0;
+  check(wait(&status) == child && status == -1,
+        "context guard page blocks user write");
 
   memset(tools, 0, sizeof(tools));
   n = tool_list(tools, sizeof(tools) - 1);
@@ -138,6 +155,7 @@ main(int argc, char **argv)
   for(int i = 0; i < 5; i++)
     check(call_tool("get_system_status", "", &resp) == AGENT_TOOL_OK,
           "tool_call records context");
+  check(agent_context_verify() == 0, "trusted context digest verifies");
 
   check(agent_info(&info) == 0 && info.context_node_count >= 5,
         "context records loop nodes");
@@ -161,6 +179,14 @@ main(int argc, char **argv)
     call_tool("get_system_status", "", &resp);
   check(agent_info(&info) == 0 && info.dropped_nodes > 0,
         "quota eviction drops old nodes");
+  check(agent_context_verify() == 0,
+        "trusted digest verifies after ring eviction");
+  check(agent_role_set(AGENT_ROLE_RETRIEVER) == 0,
+        "worker role can be fixed once");
+  check(agent_role_set(AGENT_ROLE_PATCH) == AGENT_TOOL_ERR_PERMISSION,
+        "worker role cannot be changed after lock");
+  check(agent_cap_set(AGENT_CAP_ALL) == AGENT_TOOL_ERR_PERMISSION,
+        "worker cannot escalate capabilities");
 
   if(failures){
     printf("agenttest: %d failures\n", failures);

@@ -428,7 +428,7 @@ static void tool_query_process(struct agent_tool_request *req,
 static void tool_send_message_tool(struct proc *caller, struct agent_tool_request *req,
                                     struct agent_tool_response *resp)
 {
-  uint64 pid; char message[AGENT_MESSAGE_MAX]; int message_off;
+  uint64 pid; char message[AGENT_MESSAGE_MAX]; int message_off, ret;
   if(parse_uint_param(req->params, "target_pid", &pid) < 0){
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "bad params"); return;
   }
@@ -437,8 +437,14 @@ static void tool_send_message_tool(struct proc *caller, struct agent_tool_reques
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "bad params"); return;
   }
   safestrcpy(message, req->params + message_off + strlen("message="), sizeof(message));
-  agent_send_message(caller, (int)pid, AGENT_MESSAGE_TYPE_NORMAL, message, req->request_id);
-  tool_resp_set(resp, AGENT_TOOL_OK, "message delivered");
+  ret = agent_send_message(caller, (int)pid, AGENT_MESSAGE_TYPE_NORMAL,
+                           message, req->request_id);
+  if(ret == AGENT_TOOL_ERR_BUSY)
+    tool_resp_set(resp, ret, "target mailbox full");
+  else if(ret != AGENT_TOOL_OK)
+    tool_resp_set(resp, ret, "target agent unavailable");
+  else
+    tool_resp_set(resp, AGENT_TOOL_OK, "message delivered");
 }
 
 static void tool_read_context(struct proc *p, struct agent_tool_response *resp)
@@ -669,7 +675,7 @@ static void tool_lease_begin(struct proc *caller, struct agent_tool_request *req
   if(param_value(req->params, "path", path, sizeof(path)) < 0){
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "bad params"); return;
   }
-  ret = agent_lease_begin(caller, path, &lease_id, &base_version);
+  ret = agent_proc_lease_begin(caller, path, &lease_id, &base_version);
   if(ret != AGENT_TOOL_OK){
     tool_resp_set(resp, ret, "lease begin failed"); return;
   }
@@ -690,7 +696,7 @@ static void tool_lease_commit(struct proc *caller, struct agent_tool_request *re
      parse_uint_param(req->params, "expected_version", &expected_version) < 0){
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "bad params"); return;
   }
-  ret = agent_lease_commit(caller, lease_id, expected_version);
+  ret = agent_proc_lease_commit(caller, lease_id, expected_version);
   if(ret == AGENT_TOOL_OK)
     tool_resp_set(resp, AGENT_TOOL_OK, "{status=ok}");
   else if(ret == AGENT_TOOL_ERR_STALE)
@@ -706,7 +712,7 @@ static void tool_lease_abort(struct proc *caller, struct agent_tool_request *req
   if(parse_uint_param(req->params, "lease_id", &lease_id) < 0){
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "bad params"); return;
   }
-  ret = agent_lease_abort(caller, lease_id);
+  ret = agent_proc_lease_abort(caller, lease_id);
   if(ret == AGENT_TOOL_OK)
     tool_resp_set(resp, AGENT_TOOL_OK, "{status=ok}");
   else
@@ -856,10 +862,8 @@ agent_tool_call(struct proc *p, struct agent_tool_request *req,
   if(node == 0){ p->loop_state = AGENT_LOOP_READY; return resp->status; }
   memset(node, 0, sizeof(*node));
   node->timestamp_ms = agent_now();
-  node->sequence = p->context_next_sequence++;
   node->request_id = req->request_id;
   node->status = resp->status;
-  if(p->context_next_sequence == 0) p->context_next_sequence = 1;
 
   safestrcpy(node->request, req->tool, sizeof(node->request));
   if(req->params[0]){
@@ -876,9 +880,6 @@ agent_tool_call(struct proc *p, struct agent_tool_request *req,
   safestrcpy(node->result, resp->result, sizeof(node->result));
   agent_context_push_node(p, node);
 
-  // 修改点 #6: 内核可信摘要
-  agent_context_digest_push(p, node->sequence, node->request_id,
-                             node->request, node->result, node->status);
   kfree((void*)node);
   p->loop_state = AGENT_LOOP_READY;
   return resp->status;

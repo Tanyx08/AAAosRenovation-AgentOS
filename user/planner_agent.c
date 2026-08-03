@@ -203,7 +203,7 @@ wait_for_worker_message(const char *needle1, const char *needle2)
     memset(&g_event, 0, sizeof(g_event));
     if(agent_wait(1, &g_event) < 0)
       exit(1);
-    if((g_event.reason & AGENT_EVENT_MESSAGE) == 0)
+    if(g_event.reason != AGENT_WAIT_MESSAGE)
       continue;
     print_worker_event(g_event.message);
     push_context_note("worker message", g_event.message);
@@ -368,7 +368,7 @@ main(int argc, char **argv)
 
   memset(&g_event, 0, sizeof(g_event));
   printf("[Planner-Agent] waiting for first HEARTBEAT\n");
-  if(agent_wait(1, &g_event) < 0 || (g_event.reason & AGENT_EVENT_HEARTBEAT) == 0){
+  if(agent_wait(1, &g_event) < 0 || g_event.reason != AGENT_WAIT_HEARTBEAT){
     printf("[Planner-Agent] HEARTBEAT wait failed\n");
     exit(1);
   }
@@ -462,7 +462,7 @@ main(int argc, char **argv)
     memset(&g_event, 0, sizeof(g_event));
     if(agent_wait(1, &g_event) < 0)
       break;
-    if((g_event.reason & AGENT_EVENT_MESSAGE) == 0)
+    if(g_event.reason != AGENT_WAIT_MESSAGE)
       continue;
     print_worker_event(g_event.message);
     push_context_note("worker message", g_event.message);

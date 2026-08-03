@@ -87,6 +87,20 @@ agent_context_build_header(struct proc *p, struct agent_context_header *hdr)
   hdr->last_timestamp = agent_now();
 }
 
+// 将 generation 置为奇数并先发布 header，通知用户态快照正在更新。
+static int
+agent_context_write_begin(struct proc *p)
+{
+  struct agent_context_header hdr;
+
+  if((p->context_generation & 1) == 0)
+    p->context_generation++;
+  else
+    p->context_generation += 2;
+  agent_context_build_header(p, &hdr);
+  return agent_context_write_header(p, &hdr);
+}
+
 // 修改点 #7: 更新 header 的 last_result 信息
 static void
 agent_context_fill_last(struct proc *p, struct agent_context_header *hdr)
@@ -144,8 +158,11 @@ agent_sync_header(struct proc *p)
 {
   struct agent_context_header hdr;
 
-  // 修改点 #7: generation 递增确保用户态读取一致性
-  p->context_generation++;
+  // 偶数 generation 表示一次完整、稳定的快照。
+  if(p->context_generation & 1)
+    p->context_generation++;
+  else
+    p->context_generation += 2;
 
   agent_context_build_header(p, &hdr);
   agent_context_fill_last(p, &hdr);
@@ -158,12 +175,13 @@ agent_context_clear(struct proc *p)
   char zero[128];
   uint64 cleared = 0;
 
+  if(p->context_region_start != 0)
+    agent_context_write_begin(p);
   p->context_path_len = 0;
   p->context_node_count = 0;
   p->context_dropped_nodes = 0;
-  p->context_generation++;
   p->context_first_sequence = 0;
-  p->context_next_sequence = 0;
+  p->context_next_sequence = 1;
   memset(p->context_offsets, 0, sizeof(p->context_offsets));
   memset(p->context_lengths, 0, sizeof(p->context_lengths));
   if(p->context_region_start == 0 || p->context_region_size == 0)
@@ -196,6 +214,7 @@ agent_context_push_node(struct proc *p, struct agent_context_node *node)
 
   if(p->context_region_start == 0)
     return -1;
+  node->sequence = p->context_next_sequence;
 
   memset(record, 0, sizeof(record));
   // 修改点 #7/#19: 扩展的记录格式
@@ -219,11 +238,16 @@ agent_context_push_node(struct proc *p, struct agent_context_node *node)
   rec_len = strlen(record);
   base = agent_path_base(p);
 
+  if(rec_len > agent_path_capacity(p))
+    return -1;
+  if(agent_context_write_begin(p) < 0)
+    return -1;
+  p->context_next_sequence++;
+  if(p->context_next_sequence == 0)
+    p->context_next_sequence = 1;
   while(p->context_node_count >= AGENT_CONTEXT_MAX_NODES ||
         p->context_path_len + rec_len > agent_path_capacity(p))
     agent_evict_oldest(p);
-  if(rec_len > agent_path_capacity(p))
-    return -1;
   if(copyout(p->pagetable, base + p->context_path_len, record, rec_len) < 0)
     return -1;
 
@@ -235,6 +259,10 @@ agent_context_push_node(struct proc *p, struct agent_context_node *node)
   p->context_lengths[p->context_node_count] = rec_len;
   p->context_path_len += rec_len;
   p->context_node_count++;
+
+  // 所有 Context 写入路径都同步进入内核可信摘要环。
+  agent_context_digest_push(p, node->sequence, node->request_id,
+                            node->request, node->result, node->status);
 
   // 修改点 #8: 记录查询 hash 用于复用
   p->last_context_query = node->request_id; // 简化: 用 request_id 代表查询
@@ -272,11 +300,16 @@ agent_context_rollback(struct proc *p, uint64 keep_nodes)
     agent_context_clear(p);
     return 0;
   }
+  if(agent_context_write_begin(p) < 0)
+    return -1;
   p->context_path_len = p->context_offsets[keep_nodes - 1] +
                         p->context_lengths[keep_nodes - 1];
   p->context_node_count = keep_nodes;
   p->context_next_sequence = p->context_first_sequence + keep_nodes;
   p->loop_state = AGENT_LOOP_ROLLED_BACK;
-  p->context_generation++; // 修改点 #7: rollback 递增 generation
+  // 摘要中可能包含已经回滚的节点；清空可防止旧记录被误当成有效证据。
+  memset(p->context_digests, 0, sizeof(p->context_digests));
+  p->context_digest_head = 0;
+  p->context_digest_count = 0;
   return agent_sync_header(p);
 }

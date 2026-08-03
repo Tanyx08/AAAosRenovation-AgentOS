@@ -36,6 +36,27 @@ struct agent_global_state agent_global;
 
 static uint64 agent_now_safe(void);
 
+void
+agent_global_init(void)
+{
+  memset(&agent_global, 0, sizeof(agent_global));
+  initlock(&agent_global.lock, "agent_global");
+  agent_global.ready = 1;
+}
+
+static uint64
+agent_next_identity(void)
+{
+  uint64 generation;
+
+  acquire(&agent_global.lock);
+  generation = ++agent_global.next_identity_generation;
+  if(generation == 0)
+    generation = ++agent_global.next_identity_generation;
+  release(&agent_global.lock);
+  return generation;
+}
+
 // ---- 角色→默认 capability 映射 (修改点 #3) ----
 uint64 agent_role_default_caps(int role) {
   switch(role) {
@@ -115,7 +136,7 @@ agent_context_digest_push(struct proc *p, uint64 sequence, uint64 request_id,
   if(p->context_digest_count > 0){
     int prev = p->context_digest_head - 1;
     if(prev < 0) prev = AGENT_CONTEXT_DIGEST_MAX - 1;
-    prev_hash = p->context_digests[prev].previous_hash;
+    prev_hash = p->context_digests[prev].current_hash;
   }
 
   d = &p->context_digests[p->context_digest_head];
@@ -126,7 +147,7 @@ agent_context_digest_push(struct proc *p, uint64 sequence, uint64 request_id,
   d->previous_hash = prev_hash;
   d->status = status;
 
-  // 更新 hash chain
+  // 当前摘要包含前一条摘要的 hash，形成不可断开的链。
   uint64 h = 14695981039346656037ULL;
   h ^= sequence;
   h *= 1099511628211ULL;
@@ -138,7 +159,9 @@ agent_context_digest_push(struct proc *p, uint64 sequence, uint64 request_id,
   h *= 1099511628211ULL;
   h ^= prev_hash;
   h *= 1099511628211ULL;
-  d->previous_hash = h;
+  h ^= (uint64)(uint32)status;
+  h *= 1099511628211ULL;
+  d->current_hash = h;
 
   p->context_digest_head = (p->context_digest_head + 1) % AGENT_CONTEXT_DIGEST_MAX;
   if(p->context_digest_count < AGENT_CONTEXT_DIGEST_MAX)
@@ -149,16 +172,51 @@ agent_context_digest_push(struct proc *p, uint64 sequence, uint64 request_id,
 int
 agent_context_digest_verify(struct proc *p)
 {
-  // 简单版本: 检查环中记录的存在性和连续性
-  (void)p;
-  return 0; // 返回 0 表示校验通过
+  int first;
+  uint64 expected_prev = 0;
+  uint64 previous_sequence = 0;
+
+  if(p->context_digest_count < 0 ||
+     p->context_digest_count > AGENT_CONTEXT_DIGEST_MAX ||
+     p->context_digest_head < 0 ||
+     p->context_digest_head >= AGENT_CONTEXT_DIGEST_MAX)
+    return -1;
+  if(p->context_digest_count == 0)
+    return 0;
+
+  first = p->context_digest_head - p->context_digest_count;
+  while(first < 0)
+    first += AGENT_CONTEXT_DIGEST_MAX;
+
+  for(int i = 0; i < p->context_digest_count; i++){
+    struct agent_context_digest *d =
+      &p->context_digests[(first + i) % AGENT_CONTEXT_DIGEST_MAX];
+    uint64 h = 14695981039346656037ULL;
+
+    if(i > 0 && d->previous_hash != expected_prev)
+      return -1;
+    if(i > 0 && d->sequence != previous_sequence + 1)
+      return -1;
+    h ^= d->sequence; h *= 1099511628211ULL;
+    h ^= d->request_id; h *= 1099511628211ULL;
+    h ^= d->request_hash; h *= 1099511628211ULL;
+    h ^= d->result_hash; h *= 1099511628211ULL;
+    h ^= d->previous_hash; h *= 1099511628211ULL;
+    h ^= (uint64)(uint32)d->status; h *= 1099511628211ULL;
+    if(h != d->current_hash)
+      return -1;
+    expected_prev = d->current_hash;
+    previous_sequence = d->sequence;
+  }
+  return 0;
 }
 
 void
 agent_init_proc(struct proc *p)
 {
   p->agent_type = AGENT_TYPE_NORMAL;
-  p->agent_role = 0;
+  p->agent_role = AGENT_ROLE_UNSET;
+  p->agent_role_locked = 0;
   p->heartbeat_interval = 0;
   p->resource_quota = AGENT_CONTEXT_REGION_SIZE -
                       sizeof(struct agent_context_header);
@@ -180,7 +238,7 @@ agent_init_proc(struct proc *p)
   p->agent_group = 0;
   p->agent_capabilities = 0;
   p->workflow_id = 0;
-  p->identity_generation = 1;
+  p->identity_generation = 0;
 
   // 修改点 #1: 初始化邮箱
   memset(&p->mailbox, 0, sizeof(p->mailbox));
@@ -199,7 +257,7 @@ agent_init_proc(struct proc *p)
 
   p->context_generation = 1;
   p->context_first_sequence = 0;
-  p->context_next_sequence = 0;
+  p->context_next_sequence = 1;
 
   memset(p->context_digests, 0, sizeof(p->context_digests));
   p->context_digest_head = 0;
@@ -221,7 +279,8 @@ agent_after_fork(struct proc *dst, struct proc *src)
 {
   // Agent 身份继承（降权: fork 不继承 capability，需重新认证）
   dst->agent_type = src->agent_type;
-  dst->agent_role = src->agent_role;
+  dst->agent_role = AGENT_ROLE_UNSET;
+  dst->agent_role_locked = 0;
   dst->heartbeat_interval = 0;              // fork 后不继承心跳
   dst->resource_quota = src->resource_quota;
   dst->loop_state = AGENT_LOOP_IDLE;        // fork 后重置为 IDLE
@@ -242,7 +301,7 @@ agent_after_fork(struct proc *dst, struct proc *src)
   dst->agent_group = src->agent_group;
   dst->agent_capabilities = 0;              // fork 后 capability 清零（需重新认证）
   dst->workflow_id = src->workflow_id;
-  dst->identity_generation = src->identity_generation + 1;
+  dst->identity_generation = agent_next_identity();
 
   // 邮箱不继承
   memset(&dst->mailbox, 0, sizeof(dst->mailbox));
@@ -263,7 +322,7 @@ agent_after_fork(struct proc *dst, struct proc *src)
 
   dst->context_generation = src->context_generation + 1;
   dst->context_first_sequence = 0;
-  dst->context_next_sequence = 0;
+  dst->context_next_sequence = 1;
 
   memset(dst->context_digests, 0, sizeof(dst->context_digests));
   dst->context_digest_head = 0;
@@ -293,12 +352,16 @@ agent_mark_current(int type, int heartbeat_interval, uint64 resource_quota)
     end = start + AGENT_CONTEXT_REGION_SIZE + AGENT_GUARD_PAGE_SIZE;
     if(uvmalloc(p->pagetable, p->sz, end, PTE_W) == 0)
       return -1;
+    // Context 末页保留在地址空间中，但清除 PTE_U，作为真正的 guard page。
+    uvmclear(p->pagetable, start + AGENT_CONTEXT_REGION_SIZE);
     p->sz = end;
     p->context_region_start = start;
     p->context_region_size = AGENT_CONTEXT_REGION_SIZE;
   }
   p->agent_type = type;
-  p->agent_role = 0;  // 由调用者后续设定
+  p->agent_role = type == AGENT_TYPE_PRIMARY ? AGENT_ROLE_PLANNER :
+                                                AGENT_ROLE_UNSET;
+  p->agent_role_locked = type == AGENT_TYPE_PRIMARY;
   p->heartbeat_interval = heartbeat_interval;
   p->resource_quota = resource_quota;
   p->loop_state = AGENT_LOOP_READY;
@@ -332,15 +395,16 @@ agent_mark_current(int type, int heartbeat_interval, uint64 resource_quota)
   p->budget_replenish_deadline = 0;
 
   // 修改点 #3: 默认赋予基本 capability
-  p->agent_capabilities = AGENT_CAP_QUERY_PROCESS | AGENT_CAP_QUERY_FILE |
-                          AGENT_CAP_READ_FILE | AGENT_CAP_SEND_MESSAGE;
+  p->agent_capabilities = type == AGENT_TYPE_PRIMARY ? AGENT_CAP_ALL :
+    (AGENT_CAP_QUERY_PROCESS | AGENT_CAP_QUERY_FILE |
+     AGENT_CAP_READ_FILE | AGENT_CAP_SEND_MESSAGE);
   p->workflow_id = (uint64)p->pid;
-  p->identity_generation = 1;
+  p->identity_generation = agent_next_identity();
 
   // 修改点 #7: Context generation 初始化
   p->context_generation = 1;
   p->context_first_sequence = 0;
-  p->context_next_sequence = 0;
+  p->context_next_sequence = 1;
 
   // 修改点 #6: 摘要初始化
   memset(p->context_digests, 0, sizeof(p->context_digests));
@@ -389,14 +453,46 @@ agent_proc_cap_set(struct proc *p, uint64 caps)
 {
   if(p->agent_type == AGENT_TYPE_NORMAL)
     return AGENT_TOOL_ERR_NOT_AGENT;
+  if(caps & ~AGENT_CAP_ALL)
+    return AGENT_TOOL_ERR_BAD_PARAM;
   acquire(&p->lock);
+  // capability 只能削减；增加权限必须由受信任的创建/角色分配路径完成。
+  if(caps & ~p->agent_capabilities){
+    release(&p->lock);
+    agent_audit_record(p, p->pid, "cap_set", 0,
+                       AGENT_TOOL_ERR_PERMISSION, "capability escalation");
+    return AGENT_TOOL_ERR_PERMISSION;
+  }
   p->agent_capabilities = caps;
   release(&p->lock);
   return 0;
 }
 
+int
+agent_proc_role_set(struct proc *p, int role)
+{
+  uint64 caps;
+
+  if(p->agent_type == AGENT_TYPE_NORMAL)
+    return AGENT_TOOL_ERR_NOT_AGENT;
+  if(role < AGENT_ROLE_PLANNER || role > AGENT_ROLE_TOOL_SERVICE)
+    return AGENT_TOOL_ERR_BAD_PARAM;
+  caps = agent_role_default_caps(role);
+
+  acquire(&p->lock);
+  if(p->agent_role_locked){
+    release(&p->lock);
+    return AGENT_TOOL_ERR_PERMISSION;
+  }
+  p->agent_role = role;
+  p->agent_capabilities = caps;
+  p->agent_role_locked = 1;
+  release(&p->lock);
+  return AGENT_TOOL_OK;
+}
+
 // 修改点 #1: FIFO 消息发送
-void
+int
 agent_send_message(struct proc *src, int target_pid, int msg_type,
                     const char *payload, uint64 request_id)
 {
@@ -404,77 +500,59 @@ agent_send_message(struct proc *src, int target_pid, int msg_type,
   uint64 now;
   int slot;
 
+  if(payload == 0 ||
+     (msg_type != AGENT_MESSAGE_TYPE_NORMAL &&
+      msg_type != AGENT_MESSAGE_TYPE_SYSTEM))
+    return AGENT_TOOL_ERR_BAD_PARAM;
+
   for(struct proc *p = proc; p < &proc[NPROC]; p++){
-    if(p->pid == target_pid && p->state != UNUSED){
+    acquire(&p->lock);
+    if(p->pid == target_pid && p->state != UNUSED &&
+       p->agent_type != AGENT_TYPE_NORMAL){
       target = p;
       break;
     }
+    release(&p->lock);
   }
-  if(target == 0 || target->agent_type == AGENT_TYPE_NORMAL)
-    return;
+  if(target == 0)
+    return AGENT_TOOL_ERR_SERVICE_GONE;
 
   now = agent_now_safe();
-  acquire(&target->lock);
 
-  // 检查是否有系统槽位可用
-  if(msg_type == AGENT_MESSAGE_TYPE_SYSTEM){
-    // 查找系统预留槽位
-    int sys_slots = 0;
-    for(int i = 0; i < target->mailbox.count; i++){
-      int idx = (target->mailbox.head + i) % AGENT_MAILBOX_CAP;
-      if(target->mailbox.queue[idx].type == AGENT_MESSAGE_TYPE_SYSTEM)
-        sys_slots++;
-    }
-    if(sys_slots >= AGENT_MAILBOX_SYSTEM_SLOTS && target->mailbox.count >= AGENT_MAILBOX_CAP){
-      // 替换最旧的普通消息
-      for(int i = 0; i < target->mailbox.count; i++){
-        int idx = (target->mailbox.head + i) % AGENT_MAILBOX_CAP;
-        if(target->mailbox.queue[idx].type != AGENT_MESSAGE_TYPE_SYSTEM){
-          target->mailbox.dropped++;
-          // 把系统消息写到这里并调整
-          target->mailbox.queue[idx].from_pid = src ? src->pid : 0;
-          target->mailbox.queue[idx].type = msg_type;
-          target->mailbox.queue[idx].length = strlen(payload);
-          target->mailbox.queue[idx].sequence = target->mailbox.next_sequence++;
-          target->mailbox.queue[idx].request_id = request_id;
-          safestrcpy(target->mailbox.queue[idx].payload, payload,
-                     sizeof(target->mailbox.queue[idx].payload));
-          agent_signal_event_locked(target, AGENT_EVENT_MESSAGE, now);
-          release(&target->lock);
-          return;
-        }
-      }
-      // 全是系统消息，放弃
-      target->mailbox.dropped++;
-      release(&target->lock);
-      return;
-    }
-  }
-
-  if(target->mailbox.count >= AGENT_MAILBOX_CAP){
+  if((msg_type == AGENT_MESSAGE_TYPE_NORMAL &&
+      target->mailbox.normal_count >=
+        AGENT_MAILBOX_CAP - AGENT_MAILBOX_SYSTEM_SLOTS) ||
+     target->mailbox.count >= AGENT_MAILBOX_CAP){
     target->mailbox.dropped++;
+    if(msg_type == AGENT_MESSAGE_TYPE_SYSTEM)
+      target->mailbox.system_dropped++;
     release(&target->lock);
-    return;
+    return AGENT_TOOL_ERR_BUSY;
   }
 
   slot = target->mailbox.tail;
   target->mailbox.queue[slot].from_pid = src ? src->pid : 0;
   target->mailbox.queue[slot].type = msg_type;
-  target->mailbox.queue[slot].length = strlen(payload);
+  target->mailbox.queue[slot].length = MIN(strlen(payload), AGENT_MESSAGE_MAX - 1);
   target->mailbox.queue[slot].sequence = target->mailbox.next_sequence++;
   target->mailbox.queue[slot].request_id = request_id;
   safestrcpy(target->mailbox.queue[slot].payload, payload,
              sizeof(target->mailbox.queue[slot].payload));
   target->mailbox.tail = (target->mailbox.tail + 1) % AGENT_MAILBOX_CAP;
   target->mailbox.count++;
+  if(msg_type == AGENT_MESSAGE_TYPE_SYSTEM)
+    target->mailbox.system_count++;
+  else
+    target->mailbox.normal_count++;
 
   agent_signal_event_locked(target, AGENT_EVENT_MESSAGE, now);
   release(&target->lock);
+  return AGENT_TOOL_OK;
 }
 
 // 修改点 #4/#2: Agent 发现查询
 int
-agent_query_agent(struct proc *p, int role, int capability, int group,
+agent_proc_query_agent(struct proc *p, int role, int capability, int group,
                    uint64 dst, uint64 len)
 {
   char *buf;
@@ -559,7 +637,7 @@ agent_audit_record(struct proc *p, uint64 target, const char *action,
 
 // 修改点 #2: 文件编辑租约
 int
-agent_lease_begin(struct proc *p, const char *path, uint64 *lease_id,
+agent_proc_lease_begin(struct proc *p, const char *path, uint64 *lease_id,
                    uint64 *base_version)
 {
   struct inode *ip;
@@ -582,6 +660,12 @@ agent_lease_begin(struct proc *p, const char *path, uint64 *lease_id,
   now = agent_now_safe();
   acquire(&agent_global.lock);
 
+  for(int i = 0; i < AGENT_LEASE_MAX; i++){
+    if(agent_global.leases[i].used &&
+       agent_global.leases[i].expiry_tick <= now)
+      memset(&agent_global.leases[i], 0, sizeof(agent_global.leases[i]));
+  }
+
   // 检查同一 inode 是否已被租约占用
   for(int i = 0; i < AGENT_LEASE_MAX; i++){
     if(agent_global.leases[i].used &&
@@ -601,16 +685,6 @@ agent_lease_begin(struct proc *p, const char *path, uint64 *lease_id,
     }
   }
   if(slot < 0){
-    // 清理过期租约后重试
-    agent_lease_reap_expired(now);
-    for(int i = 0; i < AGENT_LEASE_MAX; i++){
-      if(!agent_global.leases[i].used){
-        slot = i;
-        break;
-      }
-    }
-  }
-  if(slot < 0){
     release(&agent_global.lock);
     iunlockput(ip); end_op();
     return AGENT_TOOL_ERR_NO_SPACE;
@@ -620,6 +694,7 @@ agent_lease_begin(struct proc *p, const char *path, uint64 *lease_id,
   agent_global.leases[slot].dev = ip->dev;
   agent_global.leases[slot].inum = ip->inum;
   agent_global.leases[slot].owner_pid = p->pid;
+  agent_global.leases[slot].owner_generation = p->identity_generation;
   agent_global.leases[slot].lease_id = ++agent_global.next_lease_id;
   agent_global.leases[slot].base_version = 0; // 简化: 用 inode 的 size 或 mtime
   agent_global.leases[slot].expiry_tick = now + AGENT_LEASE_EXPIRY_TICKS;
@@ -627,16 +702,17 @@ agent_lease_begin(struct proc *p, const char *path, uint64 *lease_id,
   *lease_id = agent_global.leases[slot].lease_id;
   *base_version = agent_global.leases[slot].base_version;
 
+  uint audit_inum = ip->inum;
   release(&agent_global.lock);
   iunlockput(ip);
   end_op();
 
-  agent_audit_record(p, (uint64)ip->inum, "lease_begin", 1, AGENT_TOOL_OK, "");
+  agent_audit_record(p, (uint64)audit_inum, "lease_begin", 1, AGENT_TOOL_OK, "");
   return AGENT_TOOL_OK;
 }
 
 int
-agent_lease_commit(struct proc *p, uint64 lease_id, uint64 expected_version)
+agent_proc_lease_commit(struct proc *p, uint64 lease_id, uint64 expected_version)
 {
   int slot = -1;
   uint64 now = agent_now_safe();
@@ -649,7 +725,8 @@ agent_lease_commit(struct proc *p, uint64 lease_id, uint64 expected_version)
       break;
     }
   }
-  if(slot < 0 || agent_global.leases[slot].owner_pid != p->pid){
+  if(slot < 0 || agent_global.leases[slot].owner_pid != p->pid ||
+     agent_global.leases[slot].owner_generation != p->identity_generation){
     release(&agent_global.lock);
     return AGENT_TOOL_ERR_PERMISSION;
   }
@@ -667,13 +744,14 @@ agent_lease_commit(struct proc *p, uint64 lease_id, uint64 expected_version)
 }
 
 int
-agent_lease_abort(struct proc *p, uint64 lease_id)
+agent_proc_lease_abort(struct proc *p, uint64 lease_id)
 {
   acquire(&agent_global.lock);
   for(int i = 0; i < AGENT_LEASE_MAX; i++){
     if(agent_global.leases[i].used &&
        agent_global.leases[i].lease_id == lease_id &&
-       agent_global.leases[i].owner_pid == p->pid){
+       agent_global.leases[i].owner_pid == p->pid &&
+       agent_global.leases[i].owner_generation == p->identity_generation){
       memset(&agent_global.leases[i], 0, sizeof(agent_global.leases[i]));
       release(&agent_global.lock);
       return AGENT_TOOL_OK;
@@ -686,21 +764,25 @@ agent_lease_abort(struct proc *p, uint64 lease_id)
 void
 agent_lease_reap_expired(uint64 now)
 {
+  acquire(&agent_global.lock);
   for(int i = 0; i < AGENT_LEASE_MAX; i++){
     if(agent_global.leases[i].used &&
        agent_global.leases[i].expiry_tick <= now)
       memset(&agent_global.leases[i], 0, sizeof(agent_global.leases[i]));
   }
+  release(&agent_global.lock);
 }
 
 void
 agent_lease_reap_pid(int pid)
 {
+  acquire(&agent_global.lock);
   for(int i = 0; i < AGENT_LEASE_MAX; i++){
     if(agent_global.leases[i].used &&
        agent_global.leases[i].owner_pid == pid)
       memset(&agent_global.leases[i], 0, sizeof(agent_global.leases[i]));
   }
+  release(&agent_global.lock);
 }
 
 // 辅助字符串构建函数 (导出给其他模块使用)

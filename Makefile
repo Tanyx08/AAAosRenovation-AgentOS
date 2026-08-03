@@ -168,6 +168,12 @@ $U/_forktest: $U/forktest.o $(ULIB)
 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $U/_forktest $U/forktest.o $U/ulib.o $U/usys.o
 	$(OBJDUMP) -S $U/_forktest > $U/forktest.asm
 
+# xv6 directory entries are limited to DIRSIZ (14), so use a short test name.
+$U/_agentinnov: $U/agentinnovationtest.o $(ULIB)
+	$(LD) $(LDFLAGS) -T $U/user.ld -o $@ $^
+	$(OBJDUMP) -S $@ > $U/agentinnov.asm
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $U/agentinnov.sym
+
 mkfs/mkfs: mkfs/mkfs.c $K/fs.h $K/param.h
 	gcc $(XCFLAGS) -Werror -Wall -I. -o mkfs/mkfs mkfs/mkfs.c
 
@@ -199,7 +205,7 @@ UPROGS=\
 	$U/_agentfsbench\
 	$U/_agentperftest\
 	$U/_agentlooptest\
-	$U/_agentinnovationtest\
+	$U/_agentinnov\
 	$U/_planner_agent\
 	$U/_retriever_agent\
 	$U/_patch_agent\

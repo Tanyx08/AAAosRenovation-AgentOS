@@ -190,9 +190,9 @@ scheduler_worker(char kind, int ready_fd, int release_fd, int result_fd)
 
   memset(&event, 0, sizeof(event));
   reason = agent_wait(1, &event);
-  if((kind == 'M' && (reason & AGENT_EVENT_MESSAGE)) ||
-     (kind == 'F' && (reason & AGENT_EVENT_FILEMOD)) ||
-     (kind == 'H' && (reason & AGENT_EVENT_HEARTBEAT))){
+  if((kind == 'M' && reason == AGENT_WAIT_MESSAGE) ||
+     (kind == 'F' && reason == AGENT_WAIT_FILEMOD) ||
+     (kind == 'H' && reason == AGENT_WAIT_HEARTBEAT)){
     if(kind == 'F')
       sleep(1);
     else if(kind == 'H')
@@ -255,6 +255,8 @@ dynamic_tool_service(int ready_fd)
   char ok = 'R';
 
   agent_create(AGENT_TYPE_WORKER, 0, 256);
+  if(agent_role_set(AGENT_ROLE_TOOL_SERVICE) < 0)
+    exit(1);
   if(tool_register("summarize_log", AGENT_TOOL_FLAG_PUBLIC) < 0)
     exit(1);
   write(ready_fd, &ok, 1);

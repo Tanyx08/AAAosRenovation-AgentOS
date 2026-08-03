@@ -239,18 +239,20 @@ void            kcsaninit();
 #endif
 
 // ---- AgentOS 决赛新增声明 (修改点 #1-#24) ----
-void            agent_send_message(struct proc*, int, int, const char*, uint64);
-int             agent_query_agent(struct proc*, int, int, int, uint64, uint64);
+void            agent_global_init(void);
+int             agent_send_message(struct proc*, int, int, const char*, uint64);
+int             agent_proc_query_agent(struct proc*, int, int, int, uint64, uint64);
 int             agent_proc_cap_set(struct proc*, uint64);
+int             agent_proc_role_set(struct proc*, int);
 void            agent_trace(struct proc*, const char*, int, const char*);
 void            agent_trace_span(struct proc*, uint64, uint64, const char*, int, const char*);
 void            agent_audit_record(struct proc*, uint64, const char*, int, int, const char*);
 int             agent_tool_schema_get(struct proc*, const char*, struct agent_tool_schema*);
 int             agent_tool_schema_list(struct proc*, uint64, uint64);
 int             agent_tool_call_batch(struct proc*, struct agent_tool_batch_request*, struct agent_tool_batch_response*);
-int             agent_lease_begin(struct proc*, const char*, uint64*, uint64*);
-int             agent_lease_commit(struct proc*, uint64, uint64);
-int             agent_lease_abort(struct proc*, uint64);
+int             agent_proc_lease_begin(struct proc*, const char*, uint64*, uint64*);
+int             agent_proc_lease_commit(struct proc*, uint64, uint64);
+int             agent_proc_lease_abort(struct proc*, uint64);
 void            agent_lease_reap_expired(uint64);
 void            agent_lease_reap_pid(int);
 int             agent_context_digest_verify(struct proc*);

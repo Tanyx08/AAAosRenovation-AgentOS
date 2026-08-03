@@ -135,13 +135,15 @@ main(void)
 
   if((uint64)agent_create(AGENT_TYPE_WORKER, 0, 1024) == 0)
     exit(1);
+  if(agent_role_set(AGENT_ROLE_TEST) < 0)
+    exit(1);
   if(agent_sched_set(5, 4) < 0)
     exit(1);
   agent_watch(AGENT_WATCH_MESSAGE);
   push_context_note("test boot", "waiting for planner assignment");
 
   memset(&g_event, 0, sizeof(g_event));
-  if(agent_wait(1, &g_event) < 0 || (g_event.reason & AGENT_EVENT_MESSAGE) == 0)
+  if(agent_wait(1, &g_event) < 0 || g_event.reason != AGENT_WAIT_MESSAGE)
     exit(1);
   push_context_note("planner message", "received test setup");
   if(parse_uint_param(g_event.message, "reviewer_pid", &reviewer_pid) < 0 ||
@@ -150,7 +152,7 @@ main(void)
   send_message_to(planner_pid, "stage=test;status=ready;sched=5/4");
 
   memset(&g_event, 0, sizeof(g_event));
-  if(agent_wait(1, &g_event) < 0 || (g_event.reason & AGENT_EVENT_MESSAGE) == 0)
+  if(agent_wait(1, &g_event) < 0 || g_event.reason != AGENT_WAIT_MESSAGE)
     exit(1);
   push_context_note("patch message", "received patch completion");
 

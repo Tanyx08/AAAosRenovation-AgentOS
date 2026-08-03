@@ -131,6 +131,7 @@ extern uint64 sys_agent_lease_commit(void);
 extern uint64 sys_agent_lease_abort(void);
 extern uint64 sys_agent_query_agent(void);
 extern uint64 sys_agent_role_set(void);
+extern uint64 sys_agent_context_verify(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -186,6 +187,7 @@ static uint64 (*syscalls[])(void) = {
 [SYS_agent_lease_abort] sys_agent_lease_abort,
 [SYS_agent_query_agent] sys_agent_query_agent,
 [SYS_agent_role_set] sys_agent_role_set,
+[SYS_agent_context_verify] sys_agent_context_verify,
 };
 
 void

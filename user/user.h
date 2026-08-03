@@ -56,6 +56,16 @@ int tool_recv(void*);
 int tool_reply(int, const char*, int);
 int agent_watch_file(const char*);
 int agent_sched_set(int, int);
+int agent_wait_timeout(int, int, void*);
+int tool_call_batch(void*);
+int tool_schema(const char*, void*);
+int agent_cap_set(uint64);
+int agent_lease_begin(const char*, char*);
+int agent_lease_commit(uint64, uint64);
+int agent_lease_abort(uint64);
+int agent_query_agent(int, int, int, void*, uint64);
+int agent_role_set(int);
+int agent_context_verify(void);
 
 // ulib.c
 int stat(const char*, struct stat*);

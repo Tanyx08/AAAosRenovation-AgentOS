@@ -197,7 +197,7 @@ sys_agent_lease_begin(void)
   struct proc *p = myproc();
   argaddr(0, &upath); argaddr(1, &uresult);
   if(copyinstr(p->pagetable, path, upath, sizeof(path)) < 0) return -1;
-  ret = agent_lease_begin(p, path, &lease_id, &base_version);
+  ret = agent_proc_lease_begin(p, path, &lease_id, &base_version);
   if(ret != 0) return ret;
   memset(result, 0, sizeof(result));
   // 手动构造结果字符串
@@ -226,7 +226,7 @@ sys_agent_lease_commit(void)
 {
   uint64 lease_id, expected_version;
   argaddr(0, &lease_id); argaddr(1, &expected_version);
-  return agent_lease_commit(myproc(), lease_id, expected_version);
+  return agent_proc_lease_commit(myproc(), lease_id, expected_version);
 }
 
 // 修改点 #2: lease_abort
@@ -234,7 +234,7 @@ uint64
 sys_agent_lease_abort(void)
 {
   uint64 lease_id; argaddr(0, &lease_id);
-  return agent_lease_abort(myproc(), lease_id);
+  return agent_proc_lease_abort(myproc(), lease_id);
 }
 
 // 修改点 #4/#2: agent_query_agent
@@ -244,19 +244,23 @@ sys_agent_query_agent(void)
   int role, capability, group; uint64 ubuf, len;
   argint(0, &role); argint(1, &capability); argint(2, &group);
   argaddr(3, &ubuf); argaddr(4, &len);
-  return agent_query_agent(myproc(), role, capability, group, ubuf, len);
+  return agent_proc_query_agent(myproc(), role, capability, group, ubuf, len);
 }
 
 // 修改点 #3: agent_role_set
 uint64
 sys_agent_role_set(void)
 {
-  int role; struct proc *p = myproc();
+  int role;
   argint(0, &role);
-  if(p->agent_type == AGENT_TYPE_NORMAL) return AGENT_TOOL_ERR_NOT_AGENT;
-  acquire(&p->lock);
-  p->agent_role = role;
-  p->agent_capabilities = agent_role_default_caps(role);
-  release(&p->lock);
-  return 0;
+  return agent_proc_role_set(myproc(), role);
+}
+
+uint64
+sys_agent_context_verify(void)
+{
+  struct proc *p = myproc();
+  if(p->agent_type == AGENT_TYPE_NORMAL)
+    return AGENT_TOOL_ERR_NOT_AGENT;
+  return agent_context_digest_verify(p);
 }

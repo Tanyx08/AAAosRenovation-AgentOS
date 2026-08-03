@@ -283,6 +283,10 @@ agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent,
       event.msg_type = msg->type;
       event.msg_length = msg->length;
       safestrcpy(event.message, msg->payload, sizeof(event.message));
+      if(msg->type == AGENT_MESSAGE_TYPE_SYSTEM)
+        p->mailbox.system_count--;
+      else
+        p->mailbox.normal_count--;
       // 移动 head
       memset(msg, 0, sizeof(*msg));
       p->mailbox.head = (p->mailbox.head + 1) % AGENT_MAILBOX_CAP;

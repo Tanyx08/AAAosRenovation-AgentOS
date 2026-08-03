@@ -100,7 +100,7 @@ heartbeat_test(void)
   start = uptime();
   memset(&event, 0, sizeof(event));
   reason = agent_wait(1, &event);
-  check((reason & AGENT_EVENT_HEARTBEAT) != 0, "heartbeat wakes agent_wait");
+  check(reason == AGENT_WAIT_HEARTBEAT, "heartbeat wakes agent_wait");
   check(event.tick >= start + 5, "heartbeat wait really slept");
 }
 
@@ -130,7 +130,7 @@ message_only_test(void)
   start = uptime();
   memset(&event, 0, sizeof(event));
   reason = agent_wait(1, &event);
-  check(reason == AGENT_EVENT_MESSAGE, "message wakes without heartbeat");
+  check(reason == AGENT_WAIT_MESSAGE, "message wakes without heartbeat");
   check(event.tick >= start + 8, "message wait slept until sender fired");
   check(strcmp(event.message, "msg-only") == 0, "message payload delivered");
   check(wait(&status) == child && status == 0, "message sender child exits cleanly");
@@ -174,7 +174,7 @@ file_modify_event_test(void)
   start = uptime();
   memset(&event, 0, sizeof(event));
   reason = agent_wait(1, &event);
-  check(reason == AGENT_EVENT_FILEMOD, "file modification wakes agent_wait");
+  check(reason == AGENT_WAIT_FILEMOD, "file modification wakes agent_wait");
   check(event.tick >= start + 8, "file wait slept until writer fired");
   check(strcmp(event.file, "watchlog") == 0, "file event path delivered");
   check(wait(&status) == child && status == 0, "file writer child exits cleanly");
@@ -198,14 +198,14 @@ worker_loop(int interval, const char *expect_message)
 
   memset(&event, 0, sizeof(event));
   reason = agent_wait(1, &event);
-  if((reason & AGENT_EVENT_HEARTBEAT) == 0)
+  if(reason != AGENT_WAIT_HEARTBEAT)
     exit(1);
   if(agent_heartbeat_stop() < 0)
     exit(1);
 
   memset(&event, 0, sizeof(event));
   reason = agent_wait(1, &event);
-  if((reason & AGENT_EVENT_MESSAGE) == 0)
+  if(reason != AGENT_WAIT_MESSAGE)
     exit(1);
   if(strcmp(event.message, expect_message) != 0)
     exit(1);
@@ -242,6 +242,40 @@ multi_agent_test(void)
         "send_message to worker 2");
   check(wait(&status) > 0 && status == 0, "first worker exits cleanly");
   check(wait(&status) > 0 && status == 0, "second worker exits cleanly");
+}
+
+// 验证普通消息只能占用六个槽位，溢出返回 BUSY，已有消息保持 FIFO。
+static void
+mailbox_capacity_test(void)
+{
+  int child = fork();
+  int status = -1;
+
+  if(child == 0){
+    struct agent_wait_event event;
+    uint64 previous = 0;
+
+    agent_create(AGENT_TYPE_WORKER, 0, 256);
+    agent_watch(AGENT_WATCH_MESSAGE);
+    sleep(12);
+    for(int i = 0; i < AGENT_MAILBOX_CAP - AGENT_MAILBOX_SYSTEM_SLOTS; i++){
+      memset(&event, 0, sizeof(event));
+      if(agent_wait(1, &event) != AGENT_WAIT_MESSAGE ||
+         event.sequence <= previous)
+        exit(1);
+      previous = event.sequence;
+    }
+    exit(0);
+  }
+
+  sleep(2);
+  for(int i = 0; i < AGENT_MAILBOX_CAP - AGENT_MAILBOX_SYSTEM_SLOTS; i++)
+    check(send_message_to(child, "fifo") == AGENT_TOOL_OK,
+          "mailbox accepts FIFO message");
+  check(send_message_to(child, "overflow") == AGENT_TOOL_ERR_BUSY,
+        "mailbox overflow returns BUSY");
+  check(wait(&status) == child && status == 0,
+        "mailbox preserves queued FIFO messages");
 }
 
 // 调度测试用 Worker：设置 priority/quota 后持续运行一段时间，
@@ -334,6 +368,7 @@ main(void)
   message_only_test();
   file_modify_event_test();
   multi_agent_test();
+  mailbox_capacity_test();
   scheduler_policy_test();
 
   if(failures){

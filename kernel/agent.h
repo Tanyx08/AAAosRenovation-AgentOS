@@ -80,6 +80,16 @@
 #define AGENT_CAP_LEASE_ACQUIRE  (1ULL << 8)
 #define AGENT_CAP_WORKFLOW_CTRL  (1ULL << 9)
 #define AGENT_CAP_AUDIT_READ     (1ULL << 10)
+#define AGENT_CAP_ALL            ((1ULL << 11) - 1)
+
+// ---- Agent 角色 ----
+#define AGENT_ROLE_UNSET         (-1)
+#define AGENT_ROLE_PLANNER       (0)
+#define AGENT_ROLE_RETRIEVER     (1)
+#define AGENT_ROLE_PATCH         (2)
+#define AGENT_ROLE_TEST          (3)
+#define AGENT_ROLE_REVIEWER      (4)
+#define AGENT_ROLE_TOOL_SERVICE  (5)
 
 // ---- 可信 Context 摘要 (修改点 #6) ----
 #define AGENT_CONTEXT_DIGEST_MAX (16)  // 内核可信摘要环容量
@@ -228,6 +238,7 @@ struct agent_context_digest {
   uint64 request_hash;
   uint64 result_hash;
   uint64 previous_hash;
+  uint64 current_hash;
   int status;
 };
 
@@ -260,7 +271,10 @@ struct agent_mailbox {
   int head;
   int tail;
   int count;
+  int normal_count;
+  int system_count;
   uint64 dropped;
+  uint64 system_dropped;
   uint64 next_sequence;
 };
 
@@ -270,6 +284,7 @@ struct agent_edit_lease {
   uint dev;
   uint inum;
   int owner_pid;
+  uint64 owner_generation;
   uint64 lease_id;
   uint64 base_version;
   uint64 expiry_tick;
@@ -306,6 +321,7 @@ struct agent_trace_record {
 
 // ---- 函数声明 ----
 void agent_init_proc(struct proc *p);
+void agent_global_init(void);
 void agent_after_fork(struct proc *dst, struct proc *src);
 void agent_context_clear(struct proc *p);
 int agent_sync_header(struct proc *p);
@@ -332,14 +348,15 @@ int agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent,
                      int timeout_ticks);
 int agent_proc_priority_set(struct proc *p, int priority);
 int agent_proc_cap_set(struct proc *p, uint64 caps);
+int agent_proc_role_set(struct proc *p, int role);
 int agent_tool_register(struct proc *p, const char *name, int flags);
 int agent_tool_recv(struct proc *p, struct agent_dynamic_tool_request *out);
 int agent_tool_reply(struct proc *p, int request_id, const char *result,
                      int status);
-int agent_lease_begin(struct proc *p, const char *path, uint64 *lease_id,
-                       uint64 *base_version);
-int agent_lease_commit(struct proc *p, uint64 lease_id, uint64 expected_version);
-int agent_lease_abort(struct proc *p, uint64 lease_id);
+int agent_proc_lease_begin(struct proc *p, const char *path, uint64 *lease_id,
+                            uint64 *base_version);
+int agent_proc_lease_commit(struct proc *p, uint64 lease_id, uint64 expected_version);
+int agent_proc_lease_abort(struct proc *p, uint64 lease_id);
 void agent_proc_exit(struct proc *p);
 void agentfs_tool_set_file_attr(struct agent_tool_request *req,
                                 struct agent_tool_response *resp);
@@ -355,10 +372,10 @@ void agent_signal_event_locked(struct proc *p, int event, uint64 now);
 int agent_schedule_score(struct proc *p, uint64 now);
 void agent_tick(uint64 now);
 void agent_notify_file_modified(uint dev, uint inum);
-void agent_send_message(struct proc *src, int target_pid, int msg_type,
-                         const char *payload, uint64 request_id);
-int agent_query_agent(struct proc *p, int role, int capability, int group,
-                       uint64 dst, uint64 len);
+int agent_send_message(struct proc *src, int target_pid, int msg_type,
+                        const char *payload, uint64 request_id);
+int agent_proc_query_agent(struct proc *p, int role, int capability, int group,
+                            uint64 dst, uint64 len);
 void agent_trace(struct proc *p, const char *action, int status,
                   const char *cause);
 void agent_trace_span(struct proc *p, uint64 span_id, uint64 request_id,

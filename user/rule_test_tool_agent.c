@@ -234,6 +234,8 @@ main(int argc, char **argv)
 
   if((uint64)agent_create(AGENT_TYPE_WORKER, 0, 1024) == 0)
     exit(1);
+  if(agent_role_set(AGENT_ROLE_TOOL_SERVICE) < 0)
+    exit(1);
   if(agent_sched_set(4, 3) < 0)
     exit(1);
   if(tool_register("run_rule_test_dyn", AGENT_TOOL_FLAG_PUBLIC) < 0)

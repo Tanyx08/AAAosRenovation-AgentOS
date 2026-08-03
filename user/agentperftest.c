@@ -226,7 +226,7 @@ heartbeat_latency_test(void)
   start = uptime();
   memset(&event, 0, sizeof(event));
   reason = agent_wait(1, &event);
-  check((reason & AGENT_EVENT_HEARTBEAT) != 0, "heartbeat wakes wait");
+  check(reason == AGENT_WAIT_HEARTBEAT, "heartbeat wakes wait");
   check(event.tick >= start + 6, "heartbeat waits until interval");
   printf("agentperftest: latency heartbeat_wait_ticks=%d\n",
          (int)(event.tick - start));
@@ -264,7 +264,7 @@ message_latency_test(void)
   memset(&event, 0, sizeof(event));
   reason = agent_wait(1, &event);
   trigger = parse_field(event.message, "trigger");
-  check((reason & AGENT_EVENT_MESSAGE) != 0, "message wakes wait");
+  check(reason == AGENT_WAIT_MESSAGE, "message wakes wait");
   check(trigger >= 0 && event.tick >= (uint64)trigger,
         "message latency has trigger timestamp");
   printf("agentperftest: latency message_ticks=%d\n",
@@ -315,7 +315,7 @@ filemod_latency_test(void)
   reason = agent_wait(1, &event);
   read(tick_pipe[0], &trigger, sizeof(trigger));
   close(tick_pipe[0]);
-  check((reason & AGENT_EVENT_FILEMOD) != 0, "file modification wakes wait");
+  check(reason == AGENT_WAIT_FILEMOD, "file modification wakes wait");
   check(trigger >= 0 && event.tick >= (uint64)trigger,
         "filemod latency has trigger timestamp");
   printf("agentperftest: latency filemod_ticks=%d file=%s\n",
