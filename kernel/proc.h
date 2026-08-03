@@ -154,6 +154,12 @@ struct proc {
   int agent_group;
   uint64 agent_capabilities;   // 修改点 #3: 轻量 capability 位掩码
   uint64 workflow_id;          // 修改点 #4: 工作流 ID
+  int workflow_leader_pid;      // 工作流 leader PID
+  uint64 workflow_leader_generation; // leader 身份代次，防 PID 复用
+  int agent_parent_pid;         // Agent 父进程 PID
+  uint64 agent_parent_generation; // Agent 父进程身份代次
+  int is_workflow_leader;       // 只有真正的 Primary/Planner 持有
+  int workflow_member_registered; // 是否已计入 workflow 表
   uint64 identity_generation;  // 修改点 #4: 身份代次 (防 PID 复用)
 
   // ---- FIFO 邮箱 (修改点 #1) ----
@@ -211,4 +217,7 @@ struct agent_global_state {
   int heartbeat_wheel_pids[AGENT_HEARTBEAT_WHEEL_BUCKETS * 4]; // 每桶最多4个
   uint64 heartbeat_min_deadline;
   int heartbeat_count;
+
+  // Workflow 表用于级联终止和孤儿 Agent 收敛。
+  struct agent_workflow workflows[AGENT_WORKFLOW_MAX];
 };

@@ -52,3 +52,4 @@
 #define SYS_agent_query_agent 50    // 修改点 #4/#2: Agent 发现
 #define SYS_agent_role_set 51       // 修改点 #3: 设置 Agent 角色
 #define SYS_agent_context_verify 52 // 校验内核可信 Context 摘要链
+#define SYS_agent_cascade_kill 53   // Workflow 级联终止

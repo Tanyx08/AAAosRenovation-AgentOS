@@ -67,3 +67,4 @@ entry("agent_lease_abort");
 entry("agent_query_agent");
 entry("agent_role_set");
 entry("agent_context_verify");
+entry("agent_cascade_kill");

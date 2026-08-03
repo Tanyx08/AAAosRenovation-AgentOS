@@ -272,6 +272,21 @@ agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent,
   for(;;){
     reason = p->pending_events;
 
+    if(reason & AGENT_EVENT_PARENT_GONE){
+      event.reason = AGENT_WAIT_PARENT_GONE;
+      event.tick = p->wakeup_tick ? p->wakeup_tick : agent_now_safe();
+      p->pending_events &= ~AGENT_EVENT_PARENT_GONE;
+      p->last_wakeup_reason = AGENT_EVENT_PARENT_GONE;
+      p->loop_state = AGENT_LOOP_DONE;
+      p->wait_generation++;
+      release(&p->lock);
+
+      if(uevent != 0 &&
+         copyout(p->pagetable, uevent, (char*)&event, sizeof(event)) < 0)
+        return -1;
+      return AGENT_WAIT_PARENT_GONE;
+    }
+
     // 修改点 #1: 优先从邮箱读取消息
     if(p->mailbox.count > 0){
       struct agent_message *msg = &p->mailbox.queue[p->mailbox.head];
@@ -386,6 +401,8 @@ agent_event_weight(int pending_events)
 {
   if(pending_events & AGENT_EVENT_MESSAGE)
     return 30;
+  if(pending_events & AGENT_EVENT_PARENT_GONE)
+    return 25;
   if(pending_events & AGENT_EVENT_FILEMOD)
     return 20;
   if(pending_events & AGENT_EVENT_HEARTBEAT)

@@ -409,6 +409,11 @@ exit(int status)
   end_op();
   p->cwd = 0;
 
+  if(p->is_workflow_leader)
+    agent_cascade_terminate(p, AGENT_CASCADE_PLANNER_EXIT, 0);
+
+  agent_proc_exit(p);
+
   acquire(&wait_lock);
 
   // Give any children to init.
@@ -416,7 +421,6 @@ exit(int status)
 
   // Parent might be sleeping in wait().
   wakeup(p->parent);
-  agent_proc_exit(p);
   
   acquire(&p->lock);
 

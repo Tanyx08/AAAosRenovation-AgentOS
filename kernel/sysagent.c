@@ -264,3 +264,15 @@ sys_agent_context_verify(void)
     return AGENT_TOOL_ERR_NOT_AGENT;
   return agent_context_digest_verify(p);
 }
+
+uint64
+sys_agent_cascade_kill(void)
+{
+  int reason;
+  argint(0, &reason);
+  if(reason != AGENT_CASCADE_PLANNER_EXIT &&
+     reason != AGENT_CASCADE_EXPLICIT &&
+     reason != AGENT_CASCADE_FAILURE)
+    return AGENT_TOOL_ERR_BAD_PARAM;
+  return agent_cascade_terminate(myproc(), reason, 0);
+}

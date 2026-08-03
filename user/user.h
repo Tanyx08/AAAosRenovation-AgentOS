@@ -66,6 +66,7 @@ int agent_lease_abort(uint64);
 int agent_query_agent(int, int, int, void*, uint64);
 int agent_role_set(int);
 int agent_context_verify(void);
+int agent_cascade_kill(int);
 
 // ulib.c
 int stat(const char*, struct stat*);

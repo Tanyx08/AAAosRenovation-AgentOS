@@ -1056,4 +1056,7 @@ agent_proc_exit(struct proc *p)
 
   // 修改点 #2: 清理租约
   agent_lease_reap_pid(p->pid);
+
+  // Workflow 成员退出时从内核表摘除；最后一名成员离开后记录自动回收。
+  agent_workflow_leave(p);
 }

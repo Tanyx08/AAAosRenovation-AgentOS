@@ -40,6 +40,7 @@
 #define AGENT_EVENT_HEARTBEAT (1)
 #define AGENT_EVENT_MESSAGE (2)
 #define AGENT_EVENT_FILEMOD (4)
+#define AGENT_EVENT_PARENT_GONE (8)
 
 #define AGENT_WATCH_MESSAGE AGENT_EVENT_MESSAGE
 #define AGENT_WATCH_FILEMOD AGENT_EVENT_FILEMOD
@@ -131,6 +132,19 @@
 #define AGENT_WAIT_TIMEOUT   (4)
 #define AGENT_WAIT_CANCELLED (5)
 #define AGENT_WAIT_NO_SOURCE (6)
+#define AGENT_WAIT_PARENT_GONE (7)
+
+// ---- Workflow 生命周期与级联终止 ----
+#define AGENT_WORKFLOW_MAX (16)
+#define AGENT_WORKFLOW_MEMBER_MAX (64)
+#define AGENT_WORKFLOW_UNUSED (0)
+#define AGENT_WORKFLOW_ACTIVE (1)
+#define AGENT_WORKFLOW_TERMINATING (2)
+#define AGENT_WORKFLOW_DEAD (3)
+
+#define AGENT_CASCADE_PLANNER_EXIT (1)
+#define AGENT_CASCADE_EXPLICIT (2)
+#define AGENT_CASCADE_FAILURE (3)
 
 // ---- Tool Call batch (修改点 #22) ----
 #define AGENT_TOOL_BATCH_MAX (8)  // 单次 batch 最大工具数
@@ -290,6 +304,16 @@ struct agent_edit_lease {
   uint64 expiry_tick;
 };
 
+struct agent_workflow {
+  int used;
+  uint64 workflow_id;
+  int leader_pid;
+  uint64 leader_generation;
+  int state;
+  int member_count;
+  uint64 terminate_tick;
+};
+
 // ---- agent_wait 超时定时器 (修改点 #17) ----
 struct agent_wait_timer {
   int pid;
@@ -349,6 +373,8 @@ int agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent,
 int agent_proc_priority_set(struct proc *p, int priority);
 int agent_proc_cap_set(struct proc *p, uint64 caps);
 int agent_proc_role_set(struct proc *p, int role);
+int agent_cascade_terminate(struct proc *leader, int reason, int include_leader);
+int agent_workflow_leave(struct proc *p);
 int agent_tool_register(struct proc *p, const char *name, int flags);
 int agent_tool_recv(struct proc *p, struct agent_dynamic_tool_request *out);
 int agent_tool_reply(struct proc *p, int request_id, const char *result,

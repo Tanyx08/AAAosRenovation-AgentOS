@@ -205,6 +205,7 @@ UPROGS=\
 	$U/_agentfsbench\
 	$U/_agentperftest\
 	$U/_agentlooptest\
+	$U/_agentorphan\
 	$U/_agentinnov\
 	$U/_planner_agent\
 	$U/_retriever_agent\

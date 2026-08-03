@@ -57,6 +57,172 @@ agent_next_identity(void)
   return generation;
 }
 
+static struct agent_workflow*
+agent_workflow_find_locked(uint64 workflow_id, uint64 leader_generation)
+{
+  for(int i = 0; i < AGENT_WORKFLOW_MAX; i++){
+    if(agent_global.workflows[i].used &&
+       agent_global.workflows[i].workflow_id == workflow_id &&
+       agent_global.workflows[i].leader_generation == leader_generation)
+      return &agent_global.workflows[i];
+  }
+  return 0;
+}
+
+static int
+agent_workflow_create_locked(struct proc *p)
+{
+  struct agent_workflow *wf;
+
+  wf = agent_workflow_find_locked(p->workflow_id,
+                                  p->workflow_leader_generation);
+  if(wf != 0){
+    if(wf->state == AGENT_WORKFLOW_TERMINATING)
+      return AGENT_TOOL_ERR_BUSY;
+    wf->leader_pid = p->workflow_leader_pid;
+    wf->member_count++;
+    return AGENT_TOOL_OK;
+  }
+
+  for(int i = 0; i < AGENT_WORKFLOW_MAX; i++){
+    wf = &agent_global.workflows[i];
+    if(!wf->used){
+      memset(wf, 0, sizeof(*wf));
+      wf->used = 1;
+      wf->workflow_id = p->workflow_id;
+      wf->leader_pid = p->workflow_leader_pid;
+      wf->leader_generation = p->workflow_leader_generation;
+      wf->state = AGENT_WORKFLOW_ACTIVE;
+      wf->member_count = 1;
+      return AGENT_TOOL_OK;
+    }
+  }
+  return AGENT_TOOL_ERR_NO_SPACE;
+}
+
+static int
+agent_workflow_join_locked(struct proc *p)
+{
+  struct agent_workflow *wf;
+
+  if(p->workflow_id == 0 || p->workflow_leader_generation == 0)
+    return AGENT_TOOL_OK;
+  wf = agent_workflow_find_locked(p->workflow_id,
+                                  p->workflow_leader_generation);
+  if(wf == 0)
+    return AGENT_TOOL_ERR_SERVICE_GONE;
+  if(wf->state == AGENT_WORKFLOW_TERMINATING)
+    return AGENT_TOOL_ERR_BUSY;
+  if(wf->member_count >= AGENT_WORKFLOW_MEMBER_MAX)
+    return AGENT_TOOL_ERR_NO_SPACE;
+  wf->member_count++;
+  return AGENT_TOOL_OK;
+}
+
+static int
+agent_workflow_begin_terminate_locked(uint64 workflow_id,
+                                      uint64 leader_generation)
+{
+  struct agent_workflow *wf =
+    agent_workflow_find_locked(workflow_id, leader_generation);
+
+  if(wf == 0)
+    return AGENT_TOOL_ERR_SERVICE_GONE;
+  if(wf->state == AGENT_WORKFLOW_TERMINATING)
+    return AGENT_TOOL_OK;
+  if(wf->state != AGENT_WORKFLOW_ACTIVE)
+    return AGENT_TOOL_ERR_SERVICE_GONE;
+  wf->state = AGENT_WORKFLOW_TERMINATING;
+  wf->terminate_tick = agent_now_safe();
+  return AGENT_TOOL_OK;
+}
+
+int
+agent_workflow_leave(struct proc *p)
+{
+  struct agent_workflow *wf;
+
+  if(!p->workflow_member_registered ||
+     p->workflow_id == 0 || p->workflow_leader_generation == 0)
+    return 0;
+
+  acquire(&agent_global.lock);
+  wf = agent_workflow_find_locked(p->workflow_id,
+                                  p->workflow_leader_generation);
+  if(wf != 0){
+    if(wf->member_count > 0)
+      wf->member_count--;
+    if(wf->member_count <= 0){
+      wf->state = AGENT_WORKFLOW_DEAD;
+      memset(wf, 0, sizeof(*wf));
+    }
+  }
+  release(&agent_global.lock);
+  p->workflow_member_registered = 0;
+  return 0;
+}
+
+int
+agent_cascade_terminate(struct proc *leader, int reason, int include_leader)
+{
+  uint64 workflow_id;
+  uint64 leader_generation;
+  int leader_pid;
+  int ret;
+  uint64 now = agent_now_safe();
+
+  if(leader == 0 || leader->agent_type == AGENT_TYPE_NORMAL)
+    return AGENT_TOOL_ERR_NOT_AGENT;
+  if(!leader->is_workflow_leader &&
+     !(leader->agent_capabilities & AGENT_CAP_WORKFLOW_CTRL))
+    return AGENT_TOOL_ERR_PERMISSION;
+  if(leader->workflow_id == 0 || leader->workflow_leader_generation == 0)
+    return AGENT_TOOL_ERR_BAD_PARAM;
+
+  workflow_id = leader->workflow_id;
+  leader_generation = leader->workflow_leader_generation;
+  leader_pid = leader->workflow_leader_pid;
+
+  acquire(&agent_global.lock);
+  ret = agent_workflow_begin_terminate_locked(workflow_id, leader_generation);
+  release(&agent_global.lock);
+  if(ret != AGENT_TOOL_OK && ret != AGENT_TOOL_ERR_SERVICE_GONE)
+    return ret;
+
+  printf("[Agent-Lifecycle] workflow=%d leader=%d state=TERMINATING reason=%d\n",
+         (int)workflow_id, leader_pid, reason);
+
+  for(struct proc *p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state != UNUSED &&
+       p->agent_type != AGENT_TYPE_NORMAL &&
+       p->workflow_id == workflow_id &&
+       p->workflow_leader_generation == leader_generation &&
+       (include_leader || p != leader)){
+      p->killed = 1;
+      p->loop_state = AGENT_LOOP_DONE;
+      p->heartbeat_interval = 0;
+      p->heartbeat_deadline = 0;
+      p->watch_mask = 0;
+      p->pending_events |= AGENT_EVENT_PARENT_GONE;
+      p->last_wakeup_reason = AGENT_EVENT_PARENT_GONE;
+      p->wakeup_tick = now;
+      p->wait_deadline = 0;
+      p->agent_watch_dev = 0;
+      p->agent_watch_inum = 0;
+      p->agent_watch_path[0] = 0;
+      if(p->state == SLEEPING && p->chan == p)
+        p->state = RUNNABLE;
+      else if(p->state == SLEEPING)
+        p->state = RUNNABLE;
+      printf("[Agent-Lifecycle] cascade target=%d role=%d status=KILLED\n",
+             p->pid, p->agent_role);
+    }
+    release(&p->lock);
+  }
+  return AGENT_TOOL_OK;
+}
+
 // ---- 角色→默认 capability 映射 (修改点 #3) ----
 uint64 agent_role_default_caps(int role) {
   switch(role) {
@@ -238,6 +404,12 @@ agent_init_proc(struct proc *p)
   p->agent_group = 0;
   p->agent_capabilities = 0;
   p->workflow_id = 0;
+  p->workflow_leader_pid = 0;
+  p->workflow_leader_generation = 0;
+  p->agent_parent_pid = 0;
+  p->agent_parent_generation = 0;
+  p->is_workflow_leader = 0;
+  p->workflow_member_registered = 0;
   p->identity_generation = 0;
 
   // 修改点 #1: 初始化邮箱
@@ -302,6 +474,20 @@ agent_after_fork(struct proc *dst, struct proc *src)
   dst->agent_capabilities = 0;              // fork 后 capability 清零（需重新认证）
   dst->workflow_id = src->workflow_id;
   dst->identity_generation = agent_next_identity();
+  dst->workflow_leader_pid = src->workflow_leader_pid;
+  dst->workflow_leader_generation = src->workflow_leader_generation;
+  dst->agent_parent_pid = src->pid;
+  dst->agent_parent_generation = src->identity_generation;
+  dst->is_workflow_leader = 0;              // fork 子进程不能误当 workflow leader
+  dst->workflow_member_registered = 0;
+  if(dst->workflow_id != 0 && dst->workflow_leader_generation != 0){
+    acquire(&agent_global.lock);
+    if(agent_workflow_join_locked(dst) == AGENT_TOOL_OK)
+      dst->workflow_member_registered = 1;
+    else
+      dst->killed = 1;
+    release(&agent_global.lock);
+  }
 
   // 邮箱不继承
   memset(&dst->mailbox, 0, sizeof(dst->mailbox));
@@ -365,6 +551,9 @@ agent_mark_current(int type, int heartbeat_interval, uint64 resource_quota)
   p->heartbeat_interval = heartbeat_interval;
   p->resource_quota = resource_quota;
   p->loop_state = AGENT_LOOP_READY;
+  if(p->identity_generation == 0)
+    p->identity_generation = agent_next_identity();
+
   if(type == AGENT_TYPE_PRIMARY)
     p->agent_group = p->pid;
   else if(p->agent_group == 0)
@@ -398,8 +587,45 @@ agent_mark_current(int type, int heartbeat_interval, uint64 resource_quota)
   p->agent_capabilities = type == AGENT_TYPE_PRIMARY ? AGENT_CAP_ALL :
     (AGENT_CAP_QUERY_PROCESS | AGENT_CAP_QUERY_FILE |
      AGENT_CAP_READ_FILE | AGENT_CAP_SEND_MESSAGE);
-  p->workflow_id = (uint64)p->pid;
-  p->identity_generation = agent_next_identity();
+  if(type == AGENT_TYPE_PRIMARY && p->workflow_member_registered)
+    agent_workflow_leave(p);
+
+  if(type == AGENT_TYPE_PRIMARY){
+    p->workflow_id = (uint64)p->pid;
+    p->workflow_leader_pid = p->pid;
+    p->workflow_leader_generation = p->identity_generation;
+    p->agent_parent_pid = 0;
+    p->agent_parent_generation = 0;
+    p->is_workflow_leader = 1;
+    acquire(&agent_global.lock);
+    if(!p->workflow_member_registered &&
+       agent_workflow_create_locked(p) == AGENT_TOOL_OK)
+      p->workflow_member_registered = 1;
+    release(&agent_global.lock);
+  } else {
+    p->is_workflow_leader = 0;
+    if(p->workflow_id == 0 || p->workflow_leader_generation == 0){
+      p->workflow_id = (uint64)p->pid;
+      p->workflow_leader_pid = p->pid;
+      p->workflow_leader_generation = p->identity_generation;
+      p->agent_parent_pid = 0;
+      p->agent_parent_generation = 0;
+      acquire(&agent_global.lock);
+      if(!p->workflow_member_registered &&
+         agent_workflow_create_locked(p) == AGENT_TOOL_OK)
+        p->workflow_member_registered = 1;
+      release(&agent_global.lock);
+    } else if(!p->workflow_member_registered){
+      acquire(&agent_global.lock);
+      if(agent_workflow_join_locked(p) == AGENT_TOOL_OK)
+        p->workflow_member_registered = 1;
+      else {
+        release(&agent_global.lock);
+        return -1;
+      }
+      release(&agent_global.lock);
+    }
+  }
 
   // 修改点 #7: Context generation 初始化
   p->context_generation = 1;
