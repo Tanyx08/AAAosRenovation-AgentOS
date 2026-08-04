@@ -483,45 +483,6 @@ wait(uint64 addr)
   }
 }
 
-static void
-agent_sched_refill_budgets(void)
-{
-  struct proc *p;
-
-  for(p = proc; p < &proc[NPROC]; p++){
-    acquire(&p->lock);
-    if(p->state != UNUSED &&
-       p->agent_type != AGENT_TYPE_NORMAL &&
-       p->agent_sched_quota > 0)
-      p->agent_sched_budget = p->agent_sched_quota;
-    release(&p->lock);
-  }
-}
-
-static int
-agent_sched_can_refill_budgets(void)
-{
-  struct proc *p;
-  int has_exhausted = 0;
-
-  for(p = proc; p < &proc[NPROC]; p++){
-    acquire(&p->lock);
-    if(p->state != UNUSED &&
-       p->agent_type != AGENT_TYPE_NORMAL &&
-       p->agent_sched_quota > 0){
-      if((p->state == RUNNABLE || p->state == RUNNING) &&
-         p->agent_sched_budget > 0){
-        release(&p->lock);
-        return 0;
-      }
-      if(p->state == RUNNABLE && p->agent_sched_budget <= 0)
-        has_exhausted = 1;
-    }
-    release(&p->lock);
-  }
-  return has_exhausted;
-}
-
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
 // Scheduler never returns.  It loops, doing:
@@ -538,7 +499,6 @@ scheduler(void)
   uint64 now;
   int score;
   int best_score;
-  int runnable_exhausted_agents;
 
   c->proc = 0;
   for(;;){
@@ -553,17 +513,9 @@ scheduler(void)
 
     best = 0;
     best_score = -1;
-    runnable_exhausted_agents = 0;
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if(p->state == RUNNABLE) {
-        if(p->agent_type != AGENT_TYPE_NORMAL &&
-           p->agent_sched_quota > 0 &&
-           p->agent_sched_budget <= 0){
-          runnable_exhausted_agents = 1;
-          release(&p->lock);
-          continue;
-        }
         score = agent_schedule_score(p, now);
         if(score > best_score){
           if(best != 0)
@@ -591,12 +543,16 @@ scheduler(void)
       if(best->agent_type != AGENT_TYPE_NORMAL){
         if(best->agent_sched_quota > 0 && best->agent_sched_budget > 0)
           best->agent_sched_budget--;
+        best->agent_sched_vruntime++;
+        best->agent_sched_last_run = now;
+        if(best->budget_replenish_deadline == 0 &&
+           best->agent_sched_quota > 0)
+          best->budget_replenish_deadline =
+            now + AGENT_SCHED_BUDGET_REPLENISH_INTERVAL;
         if(best->agent_sched_boost > 0)
           best->agent_sched_boost--;
       }
       release(&best->lock);
-    } else if(runnable_exhausted_agents && agent_sched_can_refill_budgets()){
-      agent_sched_refill_budgets();
     }
   }
 }

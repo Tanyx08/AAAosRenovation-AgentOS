@@ -581,7 +581,9 @@ agent_mark_current(int type, int heartbeat_interval, uint64 resource_quota)
   p->agent_sched_vruntime = 0;
   p->agent_sched_last_run = 0;
   p->agent_sched_budget_penalty = 0;
-  p->budget_replenish_deadline = 0;
+  p->budget_replenish_deadline =
+    p->agent_sched_quota > 0 ?
+    agent_now_safe() + AGENT_SCHED_BUDGET_REPLENISH_INTERVAL : 0;
 
   // 修改点 #3: 默认赋予基本 capability
   p->agent_capabilities = type == AGENT_TYPE_PRIMARY ? AGENT_CAP_ALL :

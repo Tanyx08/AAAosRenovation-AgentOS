@@ -216,6 +216,8 @@ agent_proc_sched_set(struct proc *p, int priority, int quota)
     p->agent_sched_budget = quota;
   if(p->agent_sched_budget <= 0)
     p->agent_sched_budget = quota;
+  p->budget_replenish_deadline =
+    agent_now_safe() + AGENT_SCHED_BUDGET_REPLENISH_INTERVAL;
   release(&p->lock);
   return 0;
 }

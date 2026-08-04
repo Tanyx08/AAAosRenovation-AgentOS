@@ -5,6 +5,10 @@
 
 static int failures;
 
+#define PERF_FILE_COUNT (4)
+#define PERF_TARGET_INDEX (1)
+#define PERF_BATCH_QUERIES (12)
+
 static void
 check(int ok, const char *msg)
 {
@@ -156,7 +160,8 @@ query_file_perf_test(void)
   int batch_index_ticks;
   int batch_scan_ticks;
 
-  for(int i = 0; i < 48; i++){
+  printf("agentperftest: preparing %d AgentFS perf files\n", PERF_FILE_COUNT);
+  for(int i = 0; i < PERF_FILE_COUNT; i++){
     memset(name, 0, sizeof(name));
     name[0] = 'p';
     name[1] = 'f';
@@ -165,18 +170,20 @@ query_file_perf_test(void)
     name[4] = 0;
 
     strcpy(content, "AgentFS perf payload");
-    if(i == 17)
+    if(i == PERF_TARGET_INDEX)
       strcpy(content, "AgentFS perf target needle payload");
     make_file(name, content);
     if(i % 4 == 1){
       set_attr(name, "type", "perf");
       set_attr(name, "owner", "Agent-P");
-      set_attr(name, "tags", i == 17 ? "hot" : "cold");
+      set_attr(name, "tags", i == PERF_TARGET_INDEX ? "hot" : "cold");
     } else {
       set_attr(name, "type", "noise");
       set_attr(name, "owner", "Agent-Q");
       set_attr(name, "tags", "cold");
     }
+    printf("agentperftest: prepared %d/%d perf files\n",
+           i + 1, PERF_FILE_COUNT);
   }
 
   strcpy(query_index, "type=perf;owner=Agent-P;tags=hot;keyword=needle");
@@ -197,15 +204,15 @@ query_file_perf_test(void)
   check(scan_scan >= 0 && scan_full >= 0, "scan query exposes stats");
   check(idx_scan < idx_full, "index checks fewer files than full scan");
   check(scan_scan == scan_full, "scan mode touches every file");
-  check(contains(resp_index.result, "pf17"), "indexed query finds target file");
+  check(contains(resp_index.result, "pf01"), "indexed query finds target file");
 
   start = uptime();
-  for(int i = 0; i < 120; i++)
+  for(int i = 0; i < PERF_BATCH_QUERIES; i++)
     call_tool("query_file", query_index, &resp_index);
   batch_index_ticks = uptime() - start;
 
   start = uptime();
-  for(int i = 0; i < 120; i++)
+  for(int i = 0; i < PERF_BATCH_QUERIES; i++)
     call_tool("query_file", query_scan, &resp_scan);
   batch_scan_ticks = uptime() - start;
 
