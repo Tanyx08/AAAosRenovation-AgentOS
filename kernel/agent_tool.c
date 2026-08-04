@@ -386,15 +386,25 @@ static void tool_get_system_status(struct agent_tool_response *resp)
 {
   char *buf; char *ptr; int left = AGENT_TOOL_RESULT_MAX;
   int used = 0, agents = 0;
+  uint64 heartbeat_scanned, heartbeat_wakeups;
+  int heartbeat_active;
   buf = kalloc();
   if(buf == 0){ tool_resp_set(resp, AGENT_TOOL_ERR_NO_SPACE, "no memory"); return; }
   ptr = buf; memset(buf, 0, AGENT_TOOL_RESULT_MAX);
   for(struct proc *pp = proc; pp < &proc[NPROC]; pp++){
     if(pp->state != UNUSED){ used++; if(pp->agent_type != AGENT_TYPE_NORMAL) agents++; }
   }
+  acquire(&agent_global.lock);
+  heartbeat_scanned = agent_global.heartbeat_tick_scanned;
+  heartbeat_wakeups = agent_global.heartbeat_tick_wakeups;
+  heartbeat_active = agent_global.heartbeat_count;
+  release(&agent_global.lock);
   buf_puts(&ptr, &left, "{status=ok,procs="); buf_putu(&ptr, &left, used);
   buf_puts(&ptr, &left, ",agents="); buf_putu(&ptr, &left, agents);
   buf_puts(&ptr, &left, ",ticks="); buf_putu(&ptr, &left, ticks);
+  buf_puts(&ptr, &left, ",heartbeat_active="); buf_putu(&ptr, &left, heartbeat_active);
+  buf_puts(&ptr, &left, ",heartbeat_scanned="); buf_putu(&ptr, &left, heartbeat_scanned);
+  buf_puts(&ptr, &left, ",heartbeat_wakeups="); buf_putu(&ptr, &left, heartbeat_wakeups);
   buf_putc(&ptr, &left, '}');
   tool_resp_set(resp, AGENT_TOOL_OK, buf); kfree(buf);
 }
@@ -1034,6 +1044,8 @@ agent_copy_tool_list(struct proc *p, uint64 dst, uint64 len)
 void
 agent_proc_exit(struct proc *p)
 {
+  agent_heartbeat_wheel_remove(p);
+
   agent_runtime_init();
   acquire(&agent_runtime_lock);
   for(int i = 0; i < AGENT_DYNAMIC_TOOL_MAX; i++){

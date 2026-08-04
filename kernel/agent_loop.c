@@ -30,6 +30,8 @@ extern struct agent_global_state agent_global;
 
 static uint64 agent_now_safe(void);
 static int agent_event_weight(int pending_events);
+static void agent_heartbeat_wheel_remove_locked(struct proc *p);
+static void agent_heartbeat_wheel_insert_locked(struct proc *p);
 
 static uint64
 agent_now_safe(void)
@@ -39,6 +41,107 @@ agent_now_safe(void)
   now = ticks;
   release(&tickslock);
   return now;
+}
+
+static int
+agent_proc_wheel_index(struct proc *p)
+{
+  return (int)(p - proc) + 1;
+}
+
+static struct proc*
+agent_wheel_proc(int index)
+{
+  if(index <= 0 || index > NPROC)
+    return 0;
+  return &proc[index - 1];
+}
+
+static void
+agent_heartbeat_wheel_remove_locked(struct proc *p)
+{
+  int bucket;
+  int index;
+  int current;
+  int previous = 0;
+
+  if(!p->heartbeat_wheel_active)
+    return;
+  bucket = p->heartbeat_wheel_bucket;
+  index = agent_proc_wheel_index(p);
+  if(bucket < 0 || bucket >= AGENT_HEARTBEAT_WHEEL_BUCKETS){
+    p->heartbeat_wheel_active = 0;
+    p->heartbeat_wheel_next = 0;
+    p->heartbeat_wheel_bucket = -1;
+    return;
+  }
+
+  current = agent_global.heartbeat_wheel_heads[bucket];
+  while(current != 0){
+    struct proc *cp = agent_wheel_proc(current);
+    int next = cp ? cp->heartbeat_wheel_next : 0;
+    if(current == index){
+      if(previous == 0)
+        agent_global.heartbeat_wheel_heads[bucket] = next;
+      else {
+        struct proc *pp = agent_wheel_proc(previous);
+        if(pp)
+          pp->heartbeat_wheel_next = next;
+      }
+      if(agent_global.heartbeat_count > 0)
+        agent_global.heartbeat_count--;
+      break;
+    }
+    previous = current;
+    current = next;
+  }
+
+  p->heartbeat_wheel_active = 0;
+  p->heartbeat_wheel_next = 0;
+  p->heartbeat_wheel_bucket = -1;
+}
+
+static void
+agent_heartbeat_wheel_insert_locked(struct proc *p)
+{
+  int bucket;
+  int index;
+
+  if(p->heartbeat_wheel_active)
+    agent_heartbeat_wheel_remove_locked(p);
+  if(p->state == UNUSED ||
+     p->agent_type == AGENT_TYPE_NORMAL ||
+     p->loop_state == AGENT_LOOP_DONE ||
+     p->heartbeat_interval <= 0 ||
+     p->heartbeat_deadline == 0)
+    return;
+
+  bucket = (int)(p->heartbeat_deadline & (uint64)AGENT_HEARTBEAT_WHEEL_MASK);
+  index = agent_proc_wheel_index(p);
+  p->heartbeat_wheel_bucket = bucket;
+  p->heartbeat_wheel_next = agent_global.heartbeat_wheel_heads[bucket];
+  p->heartbeat_wheel_active = 1;
+  agent_global.heartbeat_wheel_heads[bucket] = index;
+  agent_global.heartbeat_count++;
+  if(agent_global.heartbeat_min_deadline == 0 ||
+     p->heartbeat_deadline < agent_global.heartbeat_min_deadline)
+    agent_global.heartbeat_min_deadline = p->heartbeat_deadline;
+}
+
+void
+agent_heartbeat_wheel_reschedule(struct proc *p)
+{
+  acquire(&agent_global.lock);
+  agent_heartbeat_wheel_insert_locked(p);
+  release(&agent_global.lock);
+}
+
+void
+agent_heartbeat_wheel_remove(struct proc *p)
+{
+  acquire(&agent_global.lock);
+  agent_heartbeat_wheel_remove_locked(p);
+  release(&agent_global.lock);
 }
 
 void
@@ -87,6 +190,7 @@ agent_proc_heartbeat_set(struct proc *p, int interval)
   if(p->loop_state != AGENT_LOOP_DONE)
     p->loop_state = AGENT_LOOP_READY;
   release(&p->lock);
+  agent_heartbeat_wheel_reschedule(p);
   return 0;
 }
 
@@ -96,6 +200,7 @@ agent_proc_heartbeat_stop(struct proc *p)
   if(p->agent_type == AGENT_TYPE_NORMAL)
     return AGENT_TOOL_ERR_NOT_AGENT;
 
+  agent_heartbeat_wheel_remove(p);
   acquire(&p->lock);
   p->heartbeat_interval = 0;
   p->heartbeat_deadline = 0;
@@ -478,18 +583,47 @@ agent_replenish_budgets(uint64 now)
 void
 agent_tick(uint64 now)
 {
+  int current;
+  int bucket;
+
   // 修改点 #12: 定期补充 budget
   agent_replenish_budgets(now);
 
   // 修改点 #2: 清理过期租约
   agent_lease_reap_expired(now);
 
-  // 修改点 #24: 使用时间轮扫描心跳而非全量遍历
-  // 简化版时间轮: 按 now % AGENT_HEARTBEAT_WHEEL_BUCKETS 查找
-  int bucket = (int)(now & (uint64)AGENT_HEARTBEAT_WHEEL_MASK);
+  // 修改点 #24: 使用时间轮扫描心跳，而不是每个 tick 遍历全部 proc。
+  bucket = (int)(now & (uint64)AGENT_HEARTBEAT_WHEEL_MASK);
+  acquire(&agent_global.lock);
+  current = agent_global.heartbeat_wheel_heads[bucket];
+  agent_global.heartbeat_wheel_heads[bucket] = 0;
+  for(int scan = current; scan != 0; ){
+    struct proc *sp = agent_wheel_proc(scan);
+    int next = sp ? sp->heartbeat_wheel_next : 0;
+    if(sp){
+      sp->heartbeat_wheel_active = 0;
+      sp->heartbeat_wheel_bucket = -1;
+      if(agent_global.heartbeat_count > 0)
+        agent_global.heartbeat_count--;
+    }
+    scan = next;
+  }
+  release(&agent_global.lock);
 
-  for(struct proc *p = proc; p < &proc[NPROC]; p++){
+  while(current != 0){
+    struct proc *p = agent_wheel_proc(current);
+    int next = p ? p->heartbeat_wheel_next : 0;
+    if(p == 0){
+      current = next;
+      continue;
+    }
+
+    acquire(&agent_global.lock);
+    agent_global.heartbeat_tick_scanned++;
+    release(&agent_global.lock);
+
     acquire(&p->lock);
+    p->heartbeat_wheel_next = 0;
     if(p->state != UNUSED &&
        p->agent_type != AGENT_TYPE_NORMAL &&
        p->loop_state != AGENT_LOOP_DONE &&
@@ -498,11 +632,19 @@ agent_tick(uint64 now)
        now >= p->heartbeat_deadline){
       agent_signal_event_locked(p, AGENT_EVENT_HEARTBEAT, now);
       p->heartbeat_deadline = now + p->heartbeat_interval;
+      acquire(&agent_global.lock);
+      agent_global.heartbeat_tick_wakeups++;
+      release(&agent_global.lock);
     }
+    if(p->state != UNUSED &&
+       p->agent_type != AGENT_TYPE_NORMAL &&
+       p->loop_state != AGENT_LOOP_DONE &&
+       p->heartbeat_interval > 0 &&
+       p->heartbeat_deadline > 0)
+      agent_heartbeat_wheel_reschedule(p);
     release(&p->lock);
+    current = next;
   }
-
-  (void)bucket; // 时间轮索引保留用于未来优化
 
   // 修改点 #17: 检查等待超时
   for(struct proc *p = proc; p < &proc[NPROC]; p++){

@@ -295,7 +295,8 @@ sched_worker(int write_fd, int priority, int quota, int runtime_ticks)
     if((counter & 0x3ff) == 0)
       ;
   }
-  if(write(write_fd, &counter, sizeof(counter)) != sizeof(counter))
+  if(write_fd >= 0 &&
+     write(write_fd, &counter, sizeof(counter)) != sizeof(counter))
     exit(1);
   exit(0);
 }
@@ -310,6 +311,7 @@ scheduler_policy_test(void)
   int low_pipe[2];
   int high_child;
   int low_child;
+  int background[4];
   int status = -1;
   uint64 high_count = 0;
   uint64 low_count = 0;
@@ -339,6 +341,18 @@ scheduler_policy_test(void)
     sched_worker(low_pipe[1], 2, 1, 80);
   }
 
+  for(int i = 0; i < 4; i++){
+    background[i] = fork();
+    if(background[i] == 0){
+      close(high_pipe[0]);
+      close(high_pipe[1]);
+      close(low_pipe[0]);
+      close(low_pipe[1]);
+      sched_worker(-1, 2, 1, 80);
+    }
+    check(background[i] > 0, "create background low-priority worker");
+  }
+
   close(high_pipe[1]);
   close(low_pipe[1]);
   check(read(high_pipe[0], &high_count, sizeof(high_count)) == sizeof(high_count),
@@ -350,6 +364,11 @@ scheduler_policy_test(void)
 
   check(wait(&status) > 0 && status == 0, "high-priority worker exits cleanly");
   check(wait(&status) > 0 && status == 0, "low-priority worker exits cleanly");
+  for(int i = 0; i < 4; i++)
+    check(wait(&status) > 0 && status == 0,
+          "background low-priority worker exits cleanly");
+  printf("agentlooptest: scheduler high_count=%d low_count=%d\n",
+         (int)high_count, (int)low_count);
   check(high_count > low_count, "higher priority/quota agent gets more CPU");
 }
 

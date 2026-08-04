@@ -393,6 +393,9 @@ agent_init_proc(struct proc *p)
   p->context_node_count = 0;
   p->context_dropped_nodes = 0;
   p->heartbeat_deadline = 0;
+  p->heartbeat_wheel_next = 0;
+  p->heartbeat_wheel_bucket = -1;
+  p->heartbeat_wheel_active = 0;
   p->wakeup_tick = 0;
   p->runnable_since = 0;
   memset(p->context_offsets, 0, sizeof(p->context_offsets));
@@ -462,6 +465,9 @@ agent_after_fork(struct proc *dst, struct proc *src)
   dst->context_node_count = 0;
   dst->context_dropped_nodes = 0;
   dst->heartbeat_deadline = 0;              // fork 不继承心跳
+  dst->heartbeat_wheel_next = 0;
+  dst->heartbeat_wheel_bucket = -1;
+  dst->heartbeat_wheel_active = 0;
   dst->wakeup_tick = 0;
   dst->runnable_since = 0;
   memset(dst->context_offsets, 0, sizeof(dst->context_offsets));
@@ -532,6 +538,7 @@ agent_mark_current(int type, int heartbeat_interval, uint64 resource_quota)
 
   if(type <= AGENT_TYPE_NORMAL)
     type = AGENT_TYPE_PRIMARY;
+  agent_heartbeat_wheel_remove(p);
   if(p->context_region_start == 0){
     // 修改点 #7: Context 区域末尾增加 guard page
     start = PGROUNDUP(p->sz);
@@ -649,6 +656,8 @@ agent_mark_current(int type, int heartbeat_interval, uint64 resource_quota)
   p->context_reuse_hit = 0;
 
   agent_context_clear(p);
+  if(p->heartbeat_interval > 0)
+    agent_heartbeat_wheel_reschedule(p);
   return p->context_region_start;
 }
 

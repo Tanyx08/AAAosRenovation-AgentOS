@@ -247,6 +247,8 @@ int             agent_proc_role_set(struct proc*, int);
 void            agent_trace(struct proc*, const char*, int, const char*);
 void            agent_trace_span(struct proc*, uint64, uint64, const char*, int, const char*);
 void            agent_audit_record(struct proc*, uint64, const char*, int, int, const char*);
+void            agent_heartbeat_wheel_reschedule(struct proc*);
+void            agent_heartbeat_wheel_remove(struct proc*);
 int             agent_tool_schema_get(struct proc*, const char*, struct agent_tool_schema*);
 int             agent_tool_schema_list(struct proc*, uint64, uint64);
 int             agent_tool_call_batch(struct proc*, struct agent_tool_batch_request*, struct agent_tool_batch_response*);

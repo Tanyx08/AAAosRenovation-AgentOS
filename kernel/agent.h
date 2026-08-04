@@ -408,6 +408,8 @@ void agent_trace_span(struct proc *p, uint64 span_id, uint64 request_id,
                        const char *action, int status, const char *cause);
 void agent_audit_record(struct proc *p, uint64 target, const char *action,
                          int decision, int status, const char *cause);
+void agent_heartbeat_wheel_reschedule(struct proc *p);
+void agent_heartbeat_wheel_remove(struct proc *p);
 int agent_context_digest_verify(struct proc *p);
 void agent_lease_reap_expired(uint64 now);
 void agent_lease_reap_pid(int pid);

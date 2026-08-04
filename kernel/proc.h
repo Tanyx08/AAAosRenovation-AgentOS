@@ -141,6 +141,9 @@ struct proc {
   uint64 context_node_count;
   uint64 context_dropped_nodes;
   uint64 heartbeat_deadline;
+  int heartbeat_wheel_next;
+  int heartbeat_wheel_bucket;
+  int heartbeat_wheel_active;
   uint64 wakeup_tick;
   uint64 runnable_since;
   uint16 context_offsets[AGENT_CONTEXT_MAX_NODES];
@@ -217,6 +220,8 @@ struct agent_global_state {
   int heartbeat_wheel_pids[AGENT_HEARTBEAT_WHEEL_BUCKETS * 4]; // 每桶最多4个
   uint64 heartbeat_min_deadline;
   int heartbeat_count;
+  uint64 heartbeat_tick_scanned;
+  uint64 heartbeat_tick_wakeups;
 
   // Workflow 表用于级联终止和孤儿 Agent 收敛。
   struct agent_workflow workflows[AGENT_WORKFLOW_MAX];

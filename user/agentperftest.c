@@ -225,10 +225,20 @@ query_file_perf_test(void)
 static void
 heartbeat_latency_test(void)
 {
+  struct agent_tool_response before;
+  struct agent_tool_response after;
   struct agent_wait_event event;
+  int scanned_before = 0;
+  int scanned_after = 0;
+  int wakeups_before = 0;
+  int wakeups_after = 0;
   int start;
   int reason;
 
+  if(call_tool("get_system_status", "", &before) == AGENT_TOOL_OK){
+    scanned_before = parse_field(before.result, "heartbeat_scanned");
+    wakeups_before = parse_field(before.result, "heartbeat_wakeups");
+  }
   check(agent_heartbeat_set(6) == 0, "heartbeat latency setup");
   start = uptime();
   memset(&event, 0, sizeof(event));
@@ -237,6 +247,12 @@ heartbeat_latency_test(void)
   check(event.tick >= start + 6, "heartbeat waits until interval");
   printf("agentperftest: latency heartbeat_wait_ticks=%d\n",
          (int)(event.tick - start));
+  if(call_tool("get_system_status", "", &after) == AGENT_TOOL_OK){
+    scanned_after = parse_field(after.result, "heartbeat_scanned");
+    wakeups_after = parse_field(after.result, "heartbeat_wakeups");
+    printf("agentperftest: heartbeat_wheel scanned_delta=%d wakeups_delta=%d\n",
+           scanned_after - scanned_before, wakeups_after - wakeups_before);
+  }
   agent_heartbeat_stop();
 }
 
