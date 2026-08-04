@@ -363,7 +363,7 @@ agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent,
      p->watch_mask == 0 &&
      p->mailbox.count == 0 &&
      timeout_ticks <= 0){
-    return AGENT_TOOL_ERR_NO_WAKE_SOURCE;
+    return AGENT_WAIT_NO_SOURCE;
   }
 
   memset(&event, 0, sizeof(event));

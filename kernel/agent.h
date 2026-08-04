@@ -102,7 +102,7 @@
 #define AGENT_HEARTBEAT_WHEEL_BUCKETS (64)  // 时间轮桶数
 #define AGENT_HEARTBEAT_WHEEL_MASK (63)
 
-// ---- 工具调用错误码 (修改点 #14) ----
+// ---- 工具调用返回码 ----
 #define AGENT_TOOL_OK (0)
 #define AGENT_TOOL_ERR_TOOL_NOT_FOUND (-1)
 #define AGENT_TOOL_ERR_BAD_PARAM (-2)
@@ -111,11 +111,6 @@
 #define AGENT_TOOL_ERR_BUSY (-5)
 #define AGENT_TOOL_ERR_PERMISSION (-6)
 #define AGENT_TOOL_ERR_SERVICE_GONE (-7)
-#define AGENT_TOOL_ERR_TIMEOUT (-8)       // 新增: 请求超时
-#define AGENT_TOOL_ERR_STALE_REQUEST (-9)  // 新增: 过期请求
-#define AGENT_TOOL_ERR_CONFLICT (-10)      // 新增: 冲突(如租约冲突)
-#define AGENT_TOOL_ERR_STALE (-11)         // 新增: 版本过期
-#define AGENT_TOOL_ERR_NO_WAKE_SOURCE (-12) // 新增: 无唤醒源
 
 // ---- 调度常量 (修改点 #12) ----
 #define AGENT_SCHED_PRIORITY_MIN (1)
@@ -174,10 +169,8 @@ struct agent_info {
   uint64 mailbox_dropped;
 };
 
-// ---- 工具调用请求/响应 (修改点 #14: 增加 version/request_id) ----
+// ---- 工具调用请求/响应 ----
 struct agent_tool_request {
-  uint32 version;                           // ABI 版本
-  uint64 request_id;                        // 请求 ID
   char tool[AGENT_TOOL_NAME_MAX];
   char params[AGENT_TOOL_PARAM_MAX];
 };
@@ -185,7 +178,6 @@ struct agent_tool_request {
 struct agent_tool_response {
   int status;
   uint32 result_len;
-  uint64 request_id;                        // 回显请求 ID
   char result[AGENT_TOOL_RESULT_MAX];
 };
 
@@ -195,7 +187,6 @@ struct agent_tool_schema {
   char params_desc[AGENT_TOOL_PARAM_MAX];   // "type:string?,owner:string?,..."
   uint64 required_cap;                      // 所需 capability
   char result_desc[AGENT_TOOL_RESULT_MAX];  // "paths[],cache_hit,..."
-  char errors_desc[128];                    // "BAD_PARAM,PERMISSION,..."
   int is_dynamic;
   int owner_pid;
   int owner_group;

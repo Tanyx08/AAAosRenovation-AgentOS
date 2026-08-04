@@ -2,7 +2,7 @@
 //
 // 决赛改进:
 // - #3: capability 权限模型 (每个工具声明 required_cap)
-// - #14: tool schema 查询、version/request_id、统一错误模型
+// - #11: tool schema 查询
 // - #22: tool_call_batch 批量工具调用
 
 #include "types.h"
@@ -59,7 +59,6 @@ struct agent_dynamic_tool {
   int owner_pid;
   int owner_group;
   int flags;
-  int version;             // 修改点 #14: 工具版本
   uint64 required_cap;     // 修改点 #3: 所需 capability
 };
 
@@ -72,7 +71,6 @@ struct agent_dynamic_request_slot {
   int caller_group;
   int service_pid;
   int status;
-  uint64 request_id;       // 修改点 #14: 请求 ID
   uint64 span_id;          // 修改点 #19: span ID
   uint64 deadline;         // 修改点 #17: 超时 deadline
   char tool[AGENT_TOOL_NAME_MAX];
@@ -303,8 +301,6 @@ agent_tool_schema_get(struct proc *p, const char *name,
 
       safestrcpy(schema->result_desc, "status=int,...",
                  sizeof(schema->result_desc));
-      safestrcpy(schema->errors_desc, "BAD_PARAM,PERMISSION,NO_SPACE,BUSY",
-                 sizeof(schema->errors_desc));
       return 0;
     }
   }
@@ -448,7 +444,7 @@ static void tool_send_message_tool(struct proc *caller, struct agent_tool_reques
   }
   safestrcpy(message, req->params + message_off + strlen("message="), sizeof(message));
   ret = agent_send_message(caller, (int)pid, AGENT_MESSAGE_TYPE_NORMAL,
-                           message, req->request_id);
+                           message, 0);
   if(ret == AGENT_TOOL_ERR_BUSY)
     tool_resp_set(resp, ret, "target mailbox full");
   else if(ret != AGENT_TOOL_OK)
@@ -709,8 +705,8 @@ static void tool_lease_commit(struct proc *caller, struct agent_tool_request *re
   ret = agent_proc_lease_commit(caller, lease_id, expected_version);
   if(ret == AGENT_TOOL_OK)
     tool_resp_set(resp, AGENT_TOOL_OK, "{status=ok}");
-  else if(ret == AGENT_TOOL_ERR_STALE)
-    tool_resp_set(resp, AGENT_TOOL_ERR_STALE, "lease stale");
+  else if(ret == AGENT_TOOL_ERR_BAD_PARAM)
+    tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "lease stale");
   else
     tool_resp_set(resp, ret, "commit failed");
 }
@@ -776,7 +772,6 @@ agent_dynamic_tool_call(struct proc *p, struct agent_tool_request *req,
   slot->caller_pid = p->pid;
   slot->caller_group = p->agent_group;
   slot->service_pid = tool->owner_pid;
-  slot->request_id = req->request_id;
   safestrcpy(slot->tool, req->tool, sizeof(slot->tool));
   safestrcpy(slot->params, req->params, sizeof(slot->params));
   request_id = slot->id;
@@ -785,7 +780,6 @@ agent_dynamic_tool_call(struct proc *p, struct agent_tool_request *req,
   for(;;){
     if(slot->replied){
       tool_resp_set(resp, slot->status, slot->result);
-      resp->request_id = slot->request_id;
       memset(slot, 0, sizeof(*slot));
       wakeup(dynamic_requests);
       release(&agent_runtime_lock);
@@ -826,9 +820,6 @@ agent_tool_call(struct proc *p, struct agent_tool_request *req,
 
   p->loop_state = AGENT_LOOP_RUNNING;
 
-  // 修改点 #14: 设置 request_id (如果调用者未设置)
-  if(req->request_id == 0) req->request_id = agent_next_request_id++;
-
   if(streq(req->tool, "query_process")){
     tool_query_process(req, resp);
   } else if(streq(req->tool, "get_system_status")){
@@ -865,14 +856,11 @@ agent_tool_call(struct proc *p, struct agent_tool_request *req,
     agent_dynamic_tool_call(p, req, resp);
   }
 
-  resp->request_id = req->request_id;
-
   // 上下文记录
   node = (struct agent_context_node*)kalloc();
   if(node == 0){ p->loop_state = AGENT_LOOP_READY; return resp->status; }
   memset(node, 0, sizeof(*node));
   node->timestamp_ms = agent_now();
-  node->request_id = req->request_id;
   node->status = resp->status;
 
   safestrcpy(node->request, req->tool, sizeof(node->request));
@@ -941,7 +929,7 @@ agent_tool_register(struct proc *p, const char *name, int flags)
   }
   if(slot == 0){ release(&agent_runtime_lock); return AGENT_TOOL_ERR_NO_SPACE; }
   memset(slot, 0, sizeof(*slot));
-  slot->used = 1; slot->version = 1;
+  slot->used = 1;
   safestrcpy(slot->name, name, sizeof(slot->name));
   slot->owner_pid = p->pid;
   slot->owner_group = p->agent_group;

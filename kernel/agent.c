@@ -911,7 +911,7 @@ agent_proc_lease_begin(struct proc *p, const char *path, uint64 *lease_id,
        agent_global.leases[i].expiry_tick > now){
       release(&agent_global.lock);
       iunlockput(ip); end_op();
-      return AGENT_TOOL_ERR_CONFLICT;
+      return AGENT_TOOL_ERR_BUSY;
     }
   }
 
@@ -969,7 +969,7 @@ agent_proc_lease_commit(struct proc *p, uint64 lease_id, uint64 expected_version
   }
   if(agent_global.leases[slot].expiry_tick <= now){
     release(&agent_global.lock);
-    return AGENT_TOOL_ERR_STALE;
+    return AGENT_TOOL_ERR_BAD_PARAM;
   }
   // 简化版本检查: 当前实现不跟踪精确版本号
   // 未来可扩展为检查 agent_file_version
