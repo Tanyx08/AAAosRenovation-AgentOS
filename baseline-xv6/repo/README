@@ -1,0 +1,3 @@
+Todo project notes:
+- delete_task should remove the task and update the task count.
+- tests should cover add_task, delete_task and count_tasks.
