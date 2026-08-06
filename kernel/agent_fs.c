@@ -310,6 +310,7 @@ static int file_query_parse(const char *params, struct agent_file_query_cond *co
     if(streq(key, "keyword")){ safestrcpy(keyword, value, keyword_sz); }
     else if(streq(key, "public")){ ; }
     else if(streq(key, "mode")){ if(streq(value, "scan")) *force_scan = 1; }
+    else if(streq(key, "nonce")){ ; }
     else if(*cond_count < AGENT_FILE_QUERY_COND_MAX){
       safestrcpy(conds[*cond_count].key, key, sizeof(conds[*cond_count].key));
       safestrcpy(conds[*cond_count].value, value, sizeof(conds[*cond_count].value)); (*cond_count)++;

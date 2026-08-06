@@ -179,6 +179,11 @@ $U/_agentlease: $U/agentleasetest.o $(ULIB)
 	$(OBJDUMP) -S $@ > $U/agentlease.asm
 	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $U/agentlease.sym
 
+$U/_mailbench: $U/agentmailbench.o $(ULIB)
+	$(LD) $(LDFLAGS) -T $U/user.ld -o $@ $^
+	$(OBJDUMP) -S $@ > $U/mailbench.asm
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $U/mailbench.sym
+
 $U/_ruletool: $U/rule_test_tool_agent.o $(ULIB)
 	$(LD) $(LDFLAGS) -T $U/user.ld -o $@ $^
 	$(OBJDUMP) -S $@ > $U/ruletool.asm
@@ -213,6 +218,11 @@ UPROGS=\
 	$U/_mmaptest\
 	$U/_agenttest\
 	$U/_agentfsbench\
+	$U/_agentfsmetric\
+	$U/_contextmetric\
+	$U/_waitmetric\
+	$U/_schedmetric\
+	$U/_mailbench\
 	$U/_agentperftest\
 	$U/_agentlooptest\
 	$U/_agentlease\

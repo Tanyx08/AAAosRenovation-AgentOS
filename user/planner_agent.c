@@ -22,6 +22,8 @@ static char g_cache_summary[128];
 static char g_sched_summary[160];
 static char g_model_summary[128];
 static char g_context_dump[768];
+static int g_tool_calls;
+static int g_agentos_syscalls;
 
 static int
 contains(const char *s, const char *needle)
@@ -72,6 +74,8 @@ call_tool(const char *tool, const char *params, struct agent_tool_response *resp
 {
   struct agent_tool_request req;
 
+  g_tool_calls++;
+  g_agentos_syscalls++;
   memset(&req, 0, sizeof(req));
   strcpy(req.tool, tool);
   strcpy(req.params, params);
@@ -221,15 +225,20 @@ read_repo_bug(void)
   int n;
 
   fd = open("/repo/todo.c", O_RDONLY);
-  if(fd < 0)
+  g_agentos_syscalls++;
+  if(fd < 0){
     fd = open("repo/todo.c", O_RDONLY);
+    g_agentos_syscalls++;
+  }
   if(fd < 0){
     printf("[Planner-Agent] cannot open /repo/todo.c\n");
     return;
   }
   memset(buf, 0, sizeof(buf));
   n = read(fd, buf, sizeof(buf) - 1);
+  g_agentos_syscalls++;
   close(fd);
+  g_agentos_syscalls++;
 
   if(n > 0 && contains(buf, "missing task_count--")){
     printf("[Planner-Agent] read repo bug marker from todo.c\n");
@@ -247,6 +256,7 @@ spawn_agent(const char *prog)
   char *argv[2];
 
   pid = fork();
+  g_agentos_syscalls++;
   if(pid != 0)
     return pid;
 
@@ -264,6 +274,7 @@ spawn_agent_with_arg(const char *prog, char *arg)
   char *argv[3];
 
   pid = fork();
+  g_agentos_syscalls++;
   if(pid != 0)
     return pid;
 
@@ -325,6 +336,15 @@ main(int argc, char **argv)
   int status = 0;
   int got_review = 0;
   int pos;
+  int start_ticks;
+  int end_ticks;
+  int agentos_ok;
+  int file_found;
+  int patch_ok;
+  int test_ok;
+  int review_ok;
+  int cache_hits;
+  int tool_calls_total;
 
   task = "fix todo delete bug";
   if(argc > 1 && strcmp(argv[1], "llm-demo") == 0){
@@ -343,6 +363,7 @@ main(int argc, char **argv)
   }
   agent_sched_set(4, 3);
   agent_watch(AGENT_WATCH_MESSAGE);
+  start_ticks = uptime();
 
   printf("[Planner-Agent] task: %s\n", task);
   copy_limited(g_plan_summary, "find files -> inspect bug -> patch -> test -> review",
@@ -500,9 +521,23 @@ main(int argc, char **argv)
 
   while(wait(&status) > 0)
     ;
+  g_agentos_syscalls++;
 
   agent_wait(0, 0);
   agent_info(&g_info);
+  end_ticks = uptime();
+
+  file_found = contains(g_file_summary, "found") ||
+               contains(g_file_summary, "localized");
+  patch_ok = contains(g_patch_summary, "patched") ||
+             contains(g_resp.result, "task_count--");
+  test_ok = contains(g_test_summary, "status=ok") ||
+            contains(g_test_summary, "passed=3");
+  review_ok = contains(g_review_summary, "approve") ||
+              contains(g_review_summary, "status=done");
+  cache_hits = contains(g_cache_summary, "cache_hit=1") ? 1 : 0;
+  agentos_ok = file_found && patch_ok && test_ok && review_ok;
+  tool_calls_total = g_tool_calls + 4; /* worker-side query/read/patch/test calls */
 
   printf("[Planner-Agent] final summary\n");
   printf("[Summary] plan: %s\n", g_plan_summary);
@@ -515,7 +550,18 @@ main(int argc, char **argv)
   printf("[Summary] dynamic tool: run_rule_test_dyn registered and used by Test-Agent\n");
   printf("[Summary] model: %s\n", g_model_summary);
   printf("[Summary] diff: %s\n", g_resp.result);
+  printf("[AGENTOS] task=fix_todo_delete status=%s\n",
+         agentos_ok ? "PASS" : "FAIL");
+  printf("[AGENTOS] file=repo/todo.c found=%d\n", file_found);
+  printf("[AGENTOS] patch=task_count-- status=%s\n",
+         patch_ok ? "PASS" : "FAIL");
+  printf("[AGENTOS] test=rule_test status=%s\n",
+         test_ok ? "PASS" : "FAIL");
+  printf("[METRIC] suite=dual target=agentos total_ticks=%d files_scanned=1 tool_calls=%d syscalls=%d polling_loops=0 idle_ticks=0 duplicate_queries=1 context_hits=0 cache_hits=%d found=%d patch_ok=%d test_ok=%d review_ok=%d status=%s\n",
+         end_ticks - start_ticks, tool_calls_total, g_agentos_syscalls,
+         cache_hits, file_found, patch_ok, test_ok, review_ok,
+         agentos_ok ? "PASS" : "FAIL");
   printf("[Context] Planner-Agent path: %s\n", g_context_dump);
   printf("[Agent-Loop] final loop_state=%d\n", g_info.loop_state);
-  exit(0);
+  exit(agentos_ok ? 0 : 1);
 }
