@@ -174,6 +174,16 @@ $U/_agentinnov: $U/agentinnovationtest.o $(ULIB)
 	$(OBJDUMP) -S $@ > $U/agentinnov.asm
 	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $U/agentinnov.sym
 
+$U/_agentlease: $U/agentleasetest.o $(ULIB)
+	$(LD) $(LDFLAGS) -T $U/user.ld -o $@ $^
+	$(OBJDUMP) -S $@ > $U/agentlease.asm
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $U/agentlease.sym
+
+$U/_ruletool: $U/rule_test_tool_agent.o $(ULIB)
+	$(LD) $(LDFLAGS) -T $U/user.ld -o $@ $^
+	$(OBJDUMP) -S $@ > $U/ruletool.asm
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $U/ruletool.sym
+
 mkfs/mkfs: mkfs/mkfs.c $K/fs.h $K/param.h
 	gcc $(XCFLAGS) -Werror -Wall -I. -o mkfs/mkfs mkfs/mkfs.c
 
@@ -205,6 +215,7 @@ UPROGS=\
 	$U/_agentfsbench\
 	$U/_agentperftest\
 	$U/_agentlooptest\
+	$U/_agentlease\
 	$U/_agentorphan\
 	$U/_agentinnov\
 	$U/_planner_agent\
@@ -212,7 +223,9 @@ UPROGS=\
 	$U/_patch_agent\
 	$U/_test_agent\
 	$U/_reviewer_agent\
+	$U/_codelabfail\
 	$U/_rule_test_tool_agent\
+	$U/_ruletool\
 	$U/_llm_bridge\
 
 

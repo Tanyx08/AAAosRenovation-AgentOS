@@ -46,6 +46,40 @@ make_file(const char *path, const char *data)
   close(fd);
 }
 
+static void
+make_exact_file(const char *path, const char *data)
+{
+  int fd;
+
+  unlink(path);
+  fd = open(path, O_CREATE | O_RDWR);
+  check(fd >= 0, "create exact file");
+  if(fd < 0)
+    return;
+  write(fd, data, strlen(data));
+  close(fd);
+}
+
+static int
+read_file_into(const char *path, char *buf, int max)
+{
+  int fd;
+  int n;
+
+  if(max <= 0)
+    return -1;
+  memset(buf, 0, max);
+  fd = open(path, O_RDONLY);
+  if(fd < 0)
+    return -1;
+  n = read(fd, buf, max - 1);
+  close(fd);
+  if(n < 0)
+    return -1;
+  buf[n] = 0;
+  return n;
+}
+
 static int
 call_tool(const char *tool, const char *params, struct agent_tool_response *resp)
 {
@@ -73,7 +107,9 @@ main(int argc, char **argv)
   struct agent_info info;
   struct agent_context_header *hdr;
   char tools[256];
+  char tools_after[256];
   char context[768];
+  char filebuf[64];
   char *ctx;
   int n;
   int child;
@@ -84,6 +120,22 @@ main(int argc, char **argv)
 
   check(call_tool("get_system_status", "", &resp) == AGENT_TOOL_ERR_NOT_AGENT,
         "normal process rejected by tool_call");
+
+  make_exact_file("capdeny", "before");
+  child = fork();
+  if(child == 0){
+    if(call_tool("patch_file",
+                 "path=capdeny;op=replace;old=before;new=after",
+                 &resp) == AGENT_TOOL_ERR_NOT_AGENT)
+      exit(0);
+    exit(1);
+  }
+  status = 0;
+  check(wait(&status) == child && status == 0,
+        "normal process rejected by patch_file");
+  check(read_file_into("capdeny", filebuf, sizeof(filebuf)) > 0 &&
+          strcmp(filebuf, "before") == 0,
+        "rejected patch_file leaves file unchanged");
 
   ctx = (char*)agent_create(AGENT_TYPE_PRIMARY, 25, 1024);
   check((uint64)ctx > 0, "agent_create returns context");
@@ -187,6 +239,18 @@ main(int argc, char **argv)
         "worker role cannot be changed after lock");
   check(agent_cap_set(AGENT_CAP_ALL) == AGENT_TOOL_ERR_PERMISSION,
         "worker cannot escalate capabilities");
+  memset(tools, 0, sizeof(tools));
+  n = tool_list(tools, sizeof(tools) - 1);
+  check(n > 0, "tool_list before rejected register");
+  check(tool_register("denied_dyn_tool", AGENT_TOOL_FLAG_PUBLIC) ==
+          AGENT_TOOL_ERR_PERMISSION,
+        "worker cannot register dynamic tool without capability");
+  memset(tools_after, 0, sizeof(tools_after));
+  n = tool_list(tools_after, sizeof(tools_after) - 1);
+  check(n > 0 &&
+          !contains(tools_after, "denied_dyn_tool") &&
+          contains(tools_after, "query_file"),
+        "rejected tool_register leaves dynamic tool table unchanged");
 
   if(failures){
     printf("agenttest: %d failures\n", failures);

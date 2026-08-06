@@ -137,6 +137,24 @@ message_only_test(void)
   check(agent_unwatch(AGENT_WATCH_MESSAGE) == 0, "unwatch message event");
 }
 
+// 测试没有任何唤醒源时，agent_wait 应快速返回 NO_WAKE_SOURCE，而不是永久睡眠。
+static void
+no_wake_source_test(void)
+{
+  struct agent_wait_event event;
+  uint64 start;
+  int reason;
+
+  check(agent_heartbeat_stop() == 0, "heartbeat_stop before no-source wait");
+  agent_unwatch(AGENT_WATCH_MESSAGE | AGENT_WATCH_FILEMOD);
+
+  start = uptime();
+  memset(&event, 0, sizeof(event));
+  reason = agent_wait(1, &event);
+  check(reason == AGENT_WAIT_NO_SOURCE, "agent_wait reports no wake source");
+  check(uptime() - start < 3, "no wake source returns quickly");
+}
+
 // 测试文件修改事件：watch 一个真实文件，子进程写该文件后应唤醒等待中的 Agent。
 static void
 file_modify_event_test(void)
@@ -179,6 +197,66 @@ file_modify_event_test(void)
   check(strcmp(event.file, "watchlog") == 0, "file event path delivered");
   check(wait(&status) == child && status == 0, "file writer child exits cleanly");
   check(agent_unwatch(AGENT_WATCH_FILEMOD) == 0, "unwatch file event");
+}
+
+// 测试只监听指定 inode：修改未监听文件不能误唤醒，随后修改监听文件才唤醒。
+static void
+unwatched_file_no_wakeup_test(void)
+{
+  struct agent_wait_event event;
+  uint64 start;
+  int child;
+  int status = -1;
+  int fd;
+  int reason;
+
+  fd = open("watchonly", O_CREATE | O_RDWR);
+  check(fd >= 0, "create precise watched file");
+  if(fd >= 0)
+    close(fd);
+  fd = open("watchother", O_CREATE | O_RDWR);
+  check(fd >= 0, "create unrelated file");
+  if(fd >= 0)
+    close(fd);
+
+  check(agent_watch_file("watchonly") == 0, "watch precise file modification");
+  check(agent_heartbeat_stop() == 0, "heartbeat_stop before precise file wait");
+
+  child = fork();
+  if(child == 0){
+    int other_fd;
+    int watched_fd;
+
+    sleep(6);
+    other_fd = open("watchother", O_RDWR);
+    if(other_fd < 0)
+      exit(1);
+    if(write(other_fd, "O", 1) != 1){
+      close(other_fd);
+      exit(1);
+    }
+    close(other_fd);
+
+    sleep(6);
+    watched_fd = open("watchonly", O_RDWR);
+    if(watched_fd < 0)
+      exit(1);
+    if(write(watched_fd, "W", 1) != 1){
+      close(watched_fd);
+      exit(1);
+    }
+    close(watched_fd);
+    exit(0);
+  }
+
+  start = uptime();
+  memset(&event, 0, sizeof(event));
+  reason = agent_wait(1, &event);
+  check(reason == AGENT_WAIT_FILEMOD, "watched inode wakes agent_wait");
+  check(event.tick >= start + 10, "unwatched inode did not wake agent_wait");
+  check(strcmp(event.file, "watchonly") == 0, "precise file event path delivered");
+  check(wait(&status) == child && status == 0, "precise file writer exits cleanly");
+  check(agent_unwatch(AGENT_WATCH_FILEMOD) == 0, "unwatch precise file event");
 }
 
 // 构造一个完整 Worker Agent Loop：
@@ -385,7 +463,9 @@ main(void)
 
   heartbeat_test();
   message_only_test();
+  no_wake_source_test();
   file_modify_event_test();
+  unwatched_file_no_wakeup_test();
   multi_agent_test();
   mailbox_capacity_test();
   scheduler_policy_test();

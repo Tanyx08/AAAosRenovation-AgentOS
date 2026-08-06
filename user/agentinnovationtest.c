@@ -107,6 +107,18 @@ set_attr_raw(const char *params)
 }
 
 static int
+get_tool_list(char *buf, int size)
+{
+  int n;
+
+  memset(buf, 0, size);
+  n = tool_list(buf, size - 1);
+  if(n >= 0 && n < size)
+    buf[n] = 0;
+  return n;
+}
+
+static int
 send_message_to(int pid, const char *message)
 {
   struct agent_tool_response resp;
@@ -167,6 +179,42 @@ shared_cache_test(void)
   check(call_tool("query_file", query, &resp) == AGENT_TOOL_OK &&
           contains(resp.result, "cache_hit=0"),
         "metadata version invalidates stale cache");
+}
+
+static void
+shared_cache_invalidation_test(void)
+{
+  struct agent_tool_response resp;
+  const char *old_query =
+    "type=code;module=todo;tags=delete;public=true;keyword=delete";
+  const char *new_query =
+    "type=code;module=todo;tags=updated;public=true;keyword=delete";
+
+  make_file("cachetodo", "delete task cache invalidation sample");
+  check(set_attr_raw("path=cachetodo;key=type;value=code") == AGENT_TOOL_OK,
+        "cache invalidation type attr");
+  check(set_attr_raw("path=cachetodo;key=module;value=todo") == AGENT_TOOL_OK,
+        "cache invalidation module attr");
+  check(set_attr_raw("path=cachetodo;key=tags;value=delete") == AGENT_TOOL_OK,
+        "cache invalidation tags attr");
+
+  check(call_tool("query_file", old_query, &resp) == AGENT_TOOL_OK &&
+          contains(resp.result, "cache_hit=0") &&
+          contains(resp.result, "cachetodo"),
+        "old query populates shared cache");
+  check(call_tool("query_file", old_query, &resp) == AGENT_TOOL_OK &&
+          contains(resp.result, "cache_hit=1"),
+        "old query hits shared cache before attr change");
+
+  check(set_attr_raw("path=cachetodo;key=tags;value=updated") == AGENT_TOOL_OK,
+        "cache invalidation updates tags attr");
+  check(call_tool("query_file", old_query, &resp) == AGENT_TOOL_OK &&
+          contains(resp.result, "cache_hit=0") &&
+          !contains(resp.result, "cachetodo"),
+        "old shared cache entry invalidated after attr change");
+  check(call_tool("query_file", new_query, &resp) == AGENT_TOOL_OK &&
+          contains(resp.result, "cachetodo"),
+        "updated attr query returns fresh result");
 }
 
 static void
@@ -249,7 +297,7 @@ event_scheduler_test(void)
 }
 
 static void
-dynamic_tool_service(int ready_fd)
+basic_dynamic_tool_service(int ready_fd)
 {
   struct agent_dynamic_tool_request req;
   char ok = 'R';
@@ -272,7 +320,7 @@ dynamic_tool_service(int ready_fd)
 }
 
 static void
-dynamic_tool_test(void)
+dynamic_tool_basic_test(void)
 {
   struct agent_tool_response resp;
   int ready[2];
@@ -283,7 +331,7 @@ dynamic_tool_test(void)
   pipe(ready);
   child = fork();
   if(child == 0)
-    dynamic_tool_service(ready[1]);
+    basic_dynamic_tool_service(ready[1]);
   read(ready[0], &ch, 1);
 
   check(call_tool("summarize_log", "file=agentlog", &resp) == AGENT_TOOL_OK &&
@@ -291,6 +339,130 @@ dynamic_tool_test(void)
         "dynamic tool register/recv/reply");
   check(wait(&status) == child && status == 0,
         "dynamic tool service exits cleanly");
+  check(call_tool("summarize_log", "file=agentlog", &resp) ==
+          AGENT_TOOL_ERR_TOOL_NOT_FOUND,
+        "dynamic tool call fails after service exit cleanup");
+}
+
+static void
+schema_dynamic_tool_service(int ready_fd, int release_fd, const char *name,
+                            int flags)
+{
+  char ok = 'R';
+  char ch;
+
+  agent_create(AGENT_TYPE_WORKER, 0, 256);
+  if(agent_role_set(AGENT_ROLE_TOOL_SERVICE) < 0)
+    exit(1);
+  if(tool_register(name, flags) < 0)
+    exit(1);
+  write(ready_fd, &ok, 1);
+  read(release_fd, &ch, 1);
+  exit(0);
+}
+
+static void
+dynamic_tool_schema_lifecycle_test(void)
+{
+  struct agent_tool_schema schema;
+  char tools[512];
+  int ready[2];
+  int releasep[2];
+  int child;
+  int status = -1;
+  char ch;
+
+  pipe(ready);
+  pipe(releasep);
+  child = fork();
+  if(child == 0)
+    schema_dynamic_tool_service(ready[1], releasep[0], "schema_tool",
+                                AGENT_TOOL_FLAG_PUBLIC);
+  read(ready[0], &ch, 1);
+
+  check(get_tool_list(tools, sizeof(tools)) > 0 &&
+          contains(tools, "schema_tool(dynamic)"),
+        "tool_list reports dynamic tool");
+  memset(&schema, 0, sizeof(schema));
+  check(tool_schema("schema_tool", &schema) == 0 &&
+          schema.is_dynamic == 1 &&
+          schema.owner_pid == child &&
+          schema.flags == AGENT_TOOL_FLAG_PUBLIC &&
+          strcmp(schema.name, "schema_tool") == 0,
+        "tool_schema reports dynamic owner and flags");
+
+  write(releasep[1], "x", 1);
+  check(wait(&status) == child && status == 0,
+        "schema tool service exits cleanly");
+  check(get_tool_list(tools, sizeof(tools)) > 0 &&
+          !contains(tools, "schema_tool(dynamic)"),
+        "dynamic tool removed from list after service exit");
+  memset(&schema, 0, sizeof(schema));
+  check(tool_schema("schema_tool", &schema) < 0,
+        "tool_schema fails after dynamic tool unregister");
+}
+
+static void
+register_only_service(int result_fd, const char *name, int flags)
+{
+  int ret;
+
+  agent_create(AGENT_TYPE_WORKER, 0, 256);
+  ret = agent_role_set(AGENT_ROLE_TOOL_SERVICE);
+  if(ret == AGENT_TOOL_OK)
+    ret = tool_register(name, flags);
+  write(result_fd, &ret, sizeof(ret));
+  sleep(20);
+  exit(0);
+}
+
+static void
+dynamic_tool_register_reject_test(void)
+{
+  char tools[512];
+  int result[2];
+  int child1;
+  int child2;
+  int worker;
+  int ret1 = 0;
+  int ret2 = 0;
+  int ret3 = 0;
+  int status = -1;
+
+  pipe(result);
+  child1 = fork();
+  if(child1 == 0)
+    register_only_service(result[1], "dup_tool", AGENT_TOOL_FLAG_PUBLIC);
+  read(result[0], &ret1, sizeof(ret1));
+  check(ret1 == AGENT_TOOL_OK, "first dynamic duplicate-name register succeeds");
+
+  child2 = fork();
+  if(child2 == 0)
+    register_only_service(result[1], "dup_tool", AGENT_TOOL_FLAG_PUBLIC);
+  read(result[0], &ret2, sizeof(ret2));
+  check(ret2 == AGENT_TOOL_ERR_BUSY,
+        "duplicate dynamic tool register returns BUSY");
+
+  worker = fork();
+  if(worker == 0){
+    agent_create(AGENT_TYPE_WORKER, 0, 256);
+    ret3 = tool_register("bad_dyn_tool", AGENT_TOOL_FLAG_PUBLIC);
+    write(result[1], &ret3, sizeof(ret3));
+    exit(0);
+  }
+  read(result[0], &ret3, sizeof(ret3));
+  check(wait(&status) == worker && status == 0,
+        "unauthorized register worker exits cleanly");
+  check(ret3 == AGENT_TOOL_ERR_PERMISSION,
+        "worker without register capability cannot register tool");
+  check(get_tool_list(tools, sizeof(tools)) > 0 &&
+          !contains(tools, "bad_dyn_tool(dynamic)"),
+        "rejected dynamic tool register leaves table unchanged");
+
+  kill(child1);
+  kill(child2);
+  check(wait(&status) > 0, "first duplicate service reaped");
+  check(wait(&status) > 0, "second duplicate service reaped");
 }
 
 int
@@ -305,8 +477,11 @@ main(void)
         "agent priority and group initialized");
 
   shared_cache_test();
+  shared_cache_invalidation_test();
   event_scheduler_test();
-  dynamic_tool_test();
+  dynamic_tool_basic_test();
+  dynamic_tool_schema_lifecycle_test();
+  dynamic_tool_register_reject_test();
 
   if(failures){
     printf("agentinnovationtest: %d failures\n", failures);
