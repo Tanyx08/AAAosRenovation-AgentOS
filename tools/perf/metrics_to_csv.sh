@@ -7,7 +7,7 @@
 
 awk '
 BEGIN {
-  header = "suite,case,target,mode,event,phase,agents,senders,messages,consumer,capacity,normal_capacity,files,run,delay,ticks,scanned,plan_scanned,full_scanned,matches,total_ticks,files_scanned,tool_calls,query_file_calls,syscalls,polling_loops,duplicate_queries,context_hit,cache_hit,cache_hits,cache_misses,wait_calls,wait_ticks,messages_received,dispatch,p50_wait,p95_wait,max_wait,fairness,high_dispatch,low_dispatch,accepted,received,busy,order_errors,duplicates,wrong_sender,wakeup_latency,trigger_tick,handle_tick,cpu_ticks,status"
+  header = "suite,case,target,mode,event,phase,agents,senders,messages,consumer,capacity,normal_capacity,files,run,delay,ticks,scanned,plan_scanned,full_scanned,matches,total_ticks,files_scanned,files_read,bytes_read,query_count,tool_calls,query_file_calls,syscalls,polling_loops,duplicate_queries,context_hit,cache_hit,cache_hits,cache_misses,wait_calls,wait_ticks,messages_received,dispatch,p50_wait,p95_wait,max_wait,fairness,high_dispatch,low_dispatch,accepted,received,busy,order_errors,duplicates,wrong_sender,wakeup_latency,trigger_tick,handle_tick,cpu_ticks,status"
   n = split(header, cols, ",")
   print header
 }

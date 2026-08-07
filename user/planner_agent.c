@@ -198,11 +198,14 @@ print_worker_event(const char *message)
     printf("[Reviewer-Agent] watch FILEMOD repo/todo.c; %s\n", message);
   } else if(contains(message, "stage=retriever") &&
             contains(message, "status=query_cache")){
-    printf("[Kernel-FS] query_file type=code,module=todo,keyword=delete -> cache_hit=0, used_index=1\n");
+    printf("[Kernel-FS] query_file tag=delete,module=todo,type=code,keyword=delete -> cache_hit=0, used_index=1\n");
     printf("[Retriever-Agent] indexed AgentFS query populated shared cache\n");
   } else if(contains(message, "stage=reviewer") &&
             contains(message, "status=query_cache")){
     printf("[Kernel-FS] reviewer repeated query -> shared query cache hit\n");
+  } else if(contains(message, "stage=reviewer") &&
+            contains(message, "status=cache_invalidated")){
+    printf("[Kernel-FS] FILEMOD invalidated shared cache; reviewer query rescanned index\n");
   } else if(contains(message, "stage=retriever") &&
             contains(message, "status=found_bug")){
     printf("[Retriever-Agent] read_file repo/todo.c -> found missing task_count--\n");
@@ -359,6 +362,8 @@ main(int argc, char **argv)
   int test_ok;
   int review_ok;
   int files_scanned;
+  int files_read;
+  int bytes_read;
   int tool_calls;
   int agent_syscalls;
   int duplicate_queries;
@@ -539,6 +544,11 @@ main(int argc, char **argv)
         copy_limited(g_cache_summary,
                      "retriever first query cache_hit=0; reviewer repeated query cache_hit=1",
                      sizeof(g_cache_summary));
+      } else if(contains(stage, "reviewer") &&
+                contains(status_value, "cache_invalidated")){
+        copy_limited(g_cache_summary,
+                     "first miss; cross-Agent hit; FILEMOD invalidation miss",
+                     sizeof(g_cache_summary));
       }
       if(contains(g_event.message, "stage=retriever") &&
          contains(g_event.message, "status=query_cache")){
@@ -594,6 +604,8 @@ main(int argc, char **argv)
   agentos_ok = file_found && patch_ok && test_ok && review_ok &&
                initial_digest_ok && final_digest_ok;
   files_scanned = result_uint(g_metrics_resp.result, "files_scanned", -1);
+  files_read = result_uint(g_metrics_resp.result, "files_read", -1);
+  bytes_read = result_uint(g_metrics_resp.result, "bytes_read", -1);
   tool_calls = result_uint(g_metrics_resp.result, "tool_calls", -1);
   agent_syscalls = result_uint(g_metrics_resp.result, "syscalls", -1);
   duplicate_queries = result_uint(g_metrics_resp.result,
@@ -606,7 +618,8 @@ main(int argc, char **argv)
   wait_ticks = result_uint(g_metrics_resp.result, "wait_ticks", -1);
   messages_received = result_uint(g_metrics_resp.result,
                                   "messages_received", -1);
-  if(files_scanned < 0 || tool_calls < 0 || agent_syscalls < 0 ||
+  if(files_scanned < 0 || files_read < 0 || bytes_read < 0 ||
+     tool_calls < 0 || agent_syscalls < 0 ||
      duplicate_queries < 0 || cache_hits < 0 || cache_misses < 0 ||
      query_file_calls < 0 || wait_calls < 0 || wait_ticks < 0 ||
      messages_received < 0)
@@ -637,8 +650,9 @@ main(int argc, char **argv)
          file_found, patch_ok, test_ok, review_ok, initial_size,
          initial_hash_hex, final_size, final_hash_hex,
          agentos_ok ? "PASS" : "FAIL");
-  printf("[METRIC] suite=dual target=agentos total_ticks=%d files_scanned=%d tool_calls=%d syscalls=%d polling_loops=0 duplicate_queries=%d cache_hits=%d cache_misses=%d query_file_calls=%d wait_calls=%d wait_ticks=%d messages_received=%d found=%d patch_ok=%d test_ok=%d review_ok=%d status=%s\n",
-         end_ticks - start_ticks, files_scanned, tool_calls, agent_syscalls,
+  printf("[METRIC] suite=dual target=agentos total_ticks=%d files_scanned=%d files_read=%d bytes_read=%d query_count=%d tool_calls=%d syscalls=%d polling_loops=0 duplicate_queries=%d cache_hits=%d cache_misses=%d query_file_calls=%d wait_calls=%d wait_ticks=%d messages_received=%d found=%d patch_ok=%d test_ok=%d review_ok=%d status=%s\n",
+         end_ticks - start_ticks, files_scanned, files_read, bytes_read,
+         query_file_calls, tool_calls, agent_syscalls,
          duplicate_queries, cache_hits, cache_misses, query_file_calls,
          wait_calls, wait_ticks, messages_received, file_found, patch_ok,
          test_ok, review_ok,

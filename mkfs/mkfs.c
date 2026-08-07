@@ -15,7 +15,7 @@
 #define static_assert(a, b) do { switch (0) case 0: case (a): ; } while (0)
 #endif
 
-#define NINODES 200
+#define NINODES 300
 
 // Disk layout:
 // [ boot block | sb block | log | inode blocks | free bit map | data blocks ]
@@ -57,6 +57,7 @@ void cache_path(const char *, uint);
 uint lookup_path(const char *);
 void pad_directory(uint);
 void apply_agent_metadata(const char *, struct dinode *);
+void add_codelab_distractors(uint);
 
 // convert to riscv byte order
 ushort
@@ -195,6 +196,8 @@ main(int argc, char *argv[])
 
     close(fd);
   }
+
+  add_codelab_distractors(rootino);
 
   for(i = 0; i < all_dir_count; i++)
     pad_directory(all_dirs[i]);
@@ -469,6 +472,42 @@ apply_agent_metadata(const char *path, struct dinode *din)
     set_attr(din, "type", "doc");
     set_attr(din, "module", "todo");
     set_attr(din, "tag", "requirement");
+  }
+}
+
+void
+add_codelab_distractors(uint rootino)
+{
+  static const char *modules[] = {
+    "auth", "store", "net", "parser", "sched", "util", "cache"
+  };
+  uint repo = ensure_dir("repo", rootino);
+
+  for(uint m = 0; m < sizeof(modules) / sizeof(modules[0]); m++){
+    for(int i = 0; i < 8; i++){
+      char name[DIRSIZ + 1];
+      char content[192];
+      struct dinode din;
+      uint inum;
+
+      snprintf(name, sizeof(name), "%.5s%02d.c", modules[m], i);
+      snprintf(content, sizeof(content),
+               "// %s module maintenance code\n"
+               "int %s_remove_%02d(int task_count) {\n"
+               "  // delete/remove/count are distractor terms\n"
+               "  return task_count > 0 ? task_count - 1 : 0;\n"
+               "}\n", modules[m], modules[m], i);
+      inum = ialloc(T_FILE);
+      rinode(inum, &din);
+      snprintf(din.summary, sizeof(din.summary),
+               "%s module remove task count helper", modules[m]);
+      set_attr(&din, "type", "code");
+      set_attr(&din, "module", modules[m]);
+      set_attr(&din, "tag", "maintenance");
+      winode(inum, &din);
+      append_dirent(repo, name, inum);
+      iappend(inum, content, strlen(content));
+    }
   }
 }
 

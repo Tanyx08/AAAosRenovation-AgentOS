@@ -5,8 +5,7 @@
 #   tools/perf/run_agentos_perf.sh [quick|small|full]
 #
 # Environment:
-#   PERF_RUN_SECONDS=seconds  Time to wait after sending benchmark commands.
-#   PERF_TIMEOUT=seconds      Outer timeout guard.
+#   PERF_TIMEOUT=seconds      Timeout for each benchmark command.
 
 set -euo pipefail
 
@@ -29,7 +28,7 @@ case "$MODE" in
       "schedmetric"
       "mailbench"
     )
-    DEFAULT_RUN_SECONDS=120
+    DEFAULT_TIMEOUT=300
     ;;
   small)
     COMMANDS=(
@@ -39,7 +38,7 @@ case "$MODE" in
       "schedmetric small"
       "mailbench small"
     )
-    DEFAULT_RUN_SECONDS=600
+    DEFAULT_TIMEOUT=600
     ;;
   full)
     COMMANDS=(
@@ -49,7 +48,7 @@ case "$MODE" in
       "schedmetric full"
       "mailbench full"
     )
-    DEFAULT_RUN_SECONDS=1800
+    DEFAULT_TIMEOUT=1800
     ;;
   *)
     echo "usage: $0 [quick|small|full]" >&2
@@ -57,26 +56,33 @@ case "$MODE" in
     ;;
 esac
 
-RUN_SECONDS="${PERF_RUN_SECONDS:-$DEFAULT_RUN_SECONDS}"
-TIMEOUT="${PERF_TIMEOUT:-$((RUN_SECONDS + 60))}"
+TIMEOUT="${PERF_TIMEOUT:-$DEFAULT_TIMEOUT}"
 
 mkdir -p "$RAW_DIR" "$CSV_DIR"
 
 echo "[HOST] run_id=$RUN_ID mode=$MODE"
-echo "[HOST] building AgentOS fs.img"
-(cd "$ROOT_DIR" && make fs.img)
-
-echo "[HOST] running AgentOS benchmarks, raw log: $RAW_LOG"
-{
-  sleep 2
-  for cmd in "${COMMANDS[@]}"; do
-    printf "%s\n" "$cmd"
-    sleep 1
-  done
-  # Leave enough time for commands. timeout(1) is still the outer guard.
-  sleep "$RUN_SECONDS"
-  printf "\001x"
-} | (cd "$ROOT_DIR" && timeout "$TIMEOUT" make qemu) > "$RAW_LOG" 2>&1 || true
+echo "[HOST] running isolated AgentOS benchmarks, raw log: $RAW_LOG"
+: > "$RAW_LOG"
+for cmd in "${COMMANDS[@]}"; do
+  suite="${cmd%% *}"
+  suite_log="$RAW_DIR/$suite.log"
+  suite_image="$RAW_DIR/$suite.img"
+  echo "[HOST] rebuilding clean image for command: $cmd"
+  (cd "$ROOT_DIR" && make -B kernel/kernel fs.img >/dev/null)
+  python3 "$SCRIPT_DIR/qemu_command_driver.py" \
+    --command "$cmd" --timeout "$TIMEOUT" --disk-image "$suite_image" \
+    > "$suite_log" 2>&1
+  if grep -Eq 'status=FAIL|\[SUMMARY\].*fail=[1-9][0-9]*' "$suite_log"; then
+    echo "[HOST] benchmark failed: $cmd" >&2
+    exit 1
+  fi
+  if ! grep -q '^\[SUMMARY\]' "$suite_log"; then
+    echo "[HOST] benchmark did not produce a summary: $cmd" >&2
+    exit 1
+  fi
+  cat "$suite_log" >> "$RAW_LOG"
+  printf '\n' >> "$RAW_LOG"
+done
 
 echo "[HOST] converting metrics to CSV: $CSV_FILE"
 "$SCRIPT_DIR/metrics_to_csv.sh" "$RAW_LOG" > "$CSV_FILE"

@@ -9,6 +9,8 @@
 #define MAX_PATCHED 2304
 
 static int files_scanned;
+static int files_read;
+static int bytes_read;
 static int syscalls_count;
 static int polling_loops;
 static int duplicate_queries;
@@ -88,6 +90,8 @@ read_file(const char *path, char *buf, int max)
   if(n < 0)
     return -1;
   buf[n] = 0;
+  files_read++;
+  bytes_read += n;
   return n;
 }
 
@@ -158,6 +162,7 @@ scan_repo_for_todo(char *target)
   int fd;
   struct dirent de;
   struct stat st;
+  int found = 0;
 
   fd = open("repo", O_RDONLY);
   syscalls_count++;
@@ -185,15 +190,15 @@ scan_repo_for_todo(char *target)
     if(contains(scan_content, "delete_task") &&
        (contains(scan_content, "missing task_count--") ||
         contains(scan_content, "task_count--;"))){
-      strcpy(target, path);
-      close(fd);
-      syscalls_count++;
-      return 0;
+      if(!found){
+        strcpy(target, path);
+        found = 1;
+      }
     }
   }
   close(fd);
   syscalls_count++;
-  return -1;
+  return found ? 0 : -1;
 }
 
 static int
@@ -307,8 +312,9 @@ main(void)
   printf("[RESULT] suite=dual target=plain found=%d patch_ok=%d test_ok=%d review_ok=%d initial_size=%d initial_hash=%s file_size=%d file_hash=%s status=%s\n",
          found, patch_ok, test_ok, review_ok, initial_size, initial_hash_hex,
          final_size, final_hash_hex, review_ok ? "PASS" : "FAIL");
-  printf("[METRIC] suite=dual target=plain total_ticks=%d files_scanned=%d syscalls=%d polling_loops=%d duplicate_queries=%d found=%d patch_ok=%d test_ok=%d review_ok=%d status=%s\n",
-         (int)(end - start), files_scanned, syscalls_count, polling_loops,
+  printf("[METRIC] suite=dual target=plain total_ticks=%d files_scanned=%d files_read=%d bytes_read=%d query_count=%d syscalls=%d polling_loops=%d duplicate_queries=%d found=%d patch_ok=%d test_ok=%d review_ok=%d status=%s\n",
+         (int)(end - start), files_scanned, files_read, bytes_read,
+         duplicate_queries + 1, syscalls_count, polling_loops,
          duplicate_queries, found, patch_ok, test_ok, review_ok,
          review_ok ? "PASS" : "FAIL");
 

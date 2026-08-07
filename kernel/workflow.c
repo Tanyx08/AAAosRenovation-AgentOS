@@ -77,6 +77,19 @@ agent_workflow_metric_query(struct proc *p, uint64 files_scanned,
 }
 
 void
+agent_workflow_metric_file_read(struct proc *p, uint64 bytes_read)
+{
+  struct agent_workflow *wf;
+
+  acquire(&agent_global.lock);
+  if((wf = workflow_find_locked(p)) != 0){
+    wf->metrics.files_read++;
+    wf->metrics.bytes_read += bytes_read;
+  }
+  release(&agent_global.lock);
+}
+
+void
 agent_workflow_metric_wait(struct proc *p, uint64 wait_ticks,
                            int message_received)
 {

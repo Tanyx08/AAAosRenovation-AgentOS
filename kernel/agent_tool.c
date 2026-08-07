@@ -441,6 +441,10 @@ tool_get_workflow_metrics(struct proc *p, struct agent_tool_response *resp)
   buf_putu(&ptr, &left, metrics.files_scanned);
   buf_puts(&ptr, &left, ",index_scanned=");
   buf_putu(&ptr, &left, metrics.index_scanned);
+  buf_puts(&ptr, &left, ",files_read=");
+  buf_putu(&ptr, &left, metrics.files_read);
+  buf_puts(&ptr, &left, ",bytes_read=");
+  buf_putu(&ptr, &left, metrics.bytes_read);
   buf_puts(&ptr, &left, ",cache_hits=");
   buf_putu(&ptr, &left, metrics.cache_hits);
   buf_puts(&ptr, &left, ",cache_misses=");
@@ -518,7 +522,7 @@ static void tool_read_context(struct proc *p, struct agent_tool_response *resp)
   tmp[n] = 0; tool_resp_set(resp, AGENT_TOOL_OK, tmp); kfree(tmp);
 }
 
-static void tool_read_file(struct agent_tool_request *req,
+static void tool_read_file(struct proc *p, struct agent_tool_request *req,
                             struct agent_tool_response *resp)
 {
   char path[64], *content, *buf, *ptr;
@@ -536,6 +540,7 @@ static void tool_read_file(struct agent_tool_request *req,
   if(n < 0){ kfree(content); kfree(buf);
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "file not found"); return;
   }
+  agent_workflow_metric_file_read(p, n);
   ptr = buf; memset(buf, 0, AGENT_TOOL_RESULT_MAX);
   buf_puts(&ptr, &left, "{status=ok,path="); buf_puts(&ptr, &left, path);
   buf_puts(&ptr, &left, ",content="); buf_puts(&ptr, &left, content);
@@ -884,7 +889,7 @@ agent_tool_call(struct proc *p, struct agent_tool_request *req,
   } else if(streq(req->tool, "read_context")){
     tool_read_context(p, resp);
   } else if(streq(req->tool, "read_file")){
-    tool_read_file(req, resp);
+    tool_read_file(p, req, resp);
   } else if(streq(req->tool, "patch_file")){
     tool_patch_file(req, resp);
   } else if(streq(req->tool, "run_rule_test")){

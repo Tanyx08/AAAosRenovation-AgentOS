@@ -302,6 +302,8 @@ struct agent_workflow_metrics {
   uint64 query_file_calls;
   uint64 files_scanned;
   uint64 index_scanned;
+  uint64 files_read;
+  uint64 bytes_read;
   uint64 cache_hits;
   uint64 cache_misses;
   uint64 duplicate_queries;
@@ -423,6 +425,7 @@ void agent_workflow_metric_syscall(struct proc *p);
 void agent_workflow_metric_tool_call(struct proc *p, int query_file);
 void agent_workflow_metric_query(struct proc *p, uint64 files_scanned,
                                  uint64 index_scanned, int cache_hit);
+void agent_workflow_metric_file_read(struct proc *p, uint64 bytes_read);
 void agent_workflow_metric_wait(struct proc *p, uint64 wait_ticks,
                                 int message_received);
 int agent_workflow_metrics_get(struct proc *p,

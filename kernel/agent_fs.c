@@ -17,7 +17,7 @@
 #include "file.h"
 #include "agent.h"
 
-#define AGENT_FILE_META_MAX (96)
+#define AGENT_FILE_META_MAX (160)
 #define AGENT_FILE_PATH_MAX (64)
 #define AGENT_FILE_INDEX_BUCKETS (67)
 #define AGENT_FILE_RESULT_MAX (3)

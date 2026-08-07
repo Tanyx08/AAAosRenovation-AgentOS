@@ -1,0 +1,70 @@
+qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel -m 128M -smp 3 -nographic -global virtio-mmio.force-legacy=false -drive file=fs.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+
+xv6 kernel is booting
+
+hart 2 starting
+hart 1 starting
+init: starting sh
+$ planner_agent
+[Planner-Agent] task: fix todo delete bug
+[Planner-Agent] waiting for first HEARTBEAT
+[Kernel-AgentLoop] HEARTBEAT -> wakeup Planner-Agent
+[Planner-Agent] rule model selected for offline demo
+[Planner-Agent] plan: find files -> inspect bug -> patch -> test -> review
+[Planner-Agent] read repo bug marker from todo.c
+[Kernel] create Retriever-Agent pid=4
+[Kernel] create Patch-Agent pid=5
+[Kernel] create Test-Agent pid=6
+[Kernel] create Reviewer-Agent pid=7
+[Kernel] create Tool-Service pid=8
+[Planner-Agent] spawned retriever=4 patch=5 test=6 reviewer=7 tool=8
+[Scheduler] Planner-Agent sched=4/3 heartbeat=12
+[Scheduler] Retriever-Agent high priority sched=8/8
+[Scheduler] Patch-Agent high priority sched=8/7
+[Scheduler] Test-Agent on-demand sched=5/4
+[Scheduler] Reviewer-Agent filemod/message sched=7/6
+[Scheduler] Tool-Service sched=4/3
+[Tool-Service] register run_rule_test_dyn ok; stage=tool;status=ready;tool=run_rule_test_dyn;sched=4/3
+[Patch-Agent] ready for MESSAGE wakeup; stage=patch;status=ready;sched=8/7
+[Test-Agent] ready for patched-file message; stage=test;status=ready;sched=5/4
+[Reviewer-Agent] watch FILEMOD repo/todo.c; stage=reviewer;status=watching;file=repo/todo.c;sched=7/6
+[Planner-Agent] send_message Retriever-Agent: find delete_task related files
+[Kernel-AgentLoop] MESSAGE -> wakeup Retriever-Agent
+[Kernel-FS] query_file tag=delete,module=todo,type=code,keyword=delete -> cache_hit=0, used_index=1
+[Retriever-Agent] indexed AgentFS query populated shared cache
+[Kernel-FS] reviewer repeated query -> shared query cache hit
+[Retriever-Agent] read_file repo/todo.c -> found missing task_count--
+[Kernel-FS] FILEMOD invalidated shared cache; reviewer query rescanned index
+[Patch-Agent] patch_file repo/todo.c replace BUG with task_count--
+[Kernel-FS] FILEMOD repo/todo.c -> wakeup Reviewer-Agent
+[Test-Agent] tool_call run_rule_test_dyn -> {status=ok,tool=run_rule_test_dyn,target=todo_delete,checks=CDT,passed=3,total=3}
+[Reviewer-Agent] diff_file + rule result -> approve
+[Planner-Agent] final summary
+[Summary] plan: find files -> inspect bug -> patch -> test -> review
+[Summary] key file: repo/todo.c found and bug localized
+[Summary] patch: repo/todo.c patched with task_count--;
+[Summary] test: {status=ok,tool=run_rule_test_dyn,target=todo_delete,checks=CDT,passed=3,total=3}
+[Summary] review: review=approve;status=done
+[Summary] shared cache: first miss; cross-Agent hit; FILEMOD invalidation miss
+[Summary] scheduling: planner=4/3 retriever=8/8 patch=8/7 test=5/4 reviewer=7/6 tool=4/3
+[Summary] dynamic tool: run_rule_test_dyn registered and used by Test-Agent
+[Summary] model: rule model demo
+[Summary] diff: {status=ok,path=repo/todo.c,diff=- // BUG: missing task_count-- | + task_count--;}
+[Summary] workflow metrics: {status=ok,workflow_id=3,tool_calls=27,syscalls=114,messages_received=19,query_file_calls=3,files_scanned=4,index_scanned=4,files_read=1,bytes_read=511,cache_hits=1,cache_misses=2,duplicate_queries=1,wait_calls=24,wait_ticks=129}
+[AGENTOS] task=fix_todo_delete status=PASS
+[AGENTOS] file=repo/todo.c found=1
+[AGENTOS] patch=task_count-- status=PASS
+[AGENTOS] test=rule_test status=PASS
+[AGENTOS] review=final_file status=PASS
+[RESULT] suite=dual target=agentos found=1 patch_ok=1 test_ok=1 review_ok=1 initial_size=655 initial_hash=8dc6b9e1 file_size=640 file_hash=c0a6e6a2 status=PASS
+[METRIC] suite=dual target=agentos total_ticks=44 files_scanned=4 files_read=1 bytes_read=511 query_count=3 tool_calls=27 syscalls=114 polling_loops=0 duplicate_queries=1 cache_hits=1 cache_misses=2 query_file_calls=3 wait_calls=24 wait_ticks=129 messages_received=19 found=1 patch_ok=1 test_ok=1 review_ok=1 status=PASS
+[Context] Planner-Agent path: {ts=46,seq=14,req_id=0,span=0,cause=0,status=0,req=worker message,res=stage=reviewer;status=query_cache;cache_hit=1;used_index=1;scanned=0;matches=1}
+{ts=56,seq=15,req_id=0,span=0,cause=0,status=0,req=worker message,res=stage=retriever;status=found_bug;file=repo/todo.c}
+{ts=57,seq=16,req_id=0,span=0,cause=0,status=0,req=worker message,res=stage=reviewer;status=cache_invalidated;cache_hit=0;scanned=2}
+{ts=57,seq=17,req_id=0,span=0,cause=0,status=0,req=worker message,res=stage=patch;status=patched;file=repo/todo.c}
+{ts=57,seq=18,req_id=0,span=0,cause=0,status=0,req=worker message,res={status=ok,tool=run_rule_test_dyn,target=todo_delete,checks=CDT,passed=3,total=3}}
+{ts=62,seq=19,req_id=0,span=0,cause=0,status=0,req=worker message,res=review=approve;status=don
+[Agent-Loop] final loop_state=5
+[Agent-Lifecycle] workflow=3 leader=3 state=TERMINATING reason=1
+$ QEMU: Terminated
+

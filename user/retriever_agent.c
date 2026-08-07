@@ -197,11 +197,13 @@ main(void)
     exit(1);
   }
 
-  if(call_tool("query_file", "type=code;module=todo;keyword=delete", &g_resp) != AGENT_TOOL_OK){
+  if(call_tool("query_file",
+               "tag=delete;module=todo;type=code;keyword=delete",
+               &g_resp) != AGENT_TOOL_OK){
     printf("retriever_agent: query_file failed\n");
     exit(1);
   }
-  push_context_note("query_file(type=code,module=todo,keyword=delete)",
+  push_context_note("query_file(tag=delete,module=todo,type=code,keyword=delete)",
                     g_resp.result);
   memset(metric_message, 0, sizeof(metric_message));
   pos = 0;

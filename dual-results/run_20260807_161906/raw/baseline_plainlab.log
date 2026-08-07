@@ -1,0 +1,17 @@
+qemu-system-riscv64 -machine virt -bios none -kernel kernel/kernel -m 128M -smp 3 -nographic -global virtio-mmio.force-legacy=false -drive file=fs.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+
+xv6 kernel is booting
+
+hart 2 starting
+hart 1 starting
+init: starting sh
+$ plainlab
+[PLAIN] task=fix_todo_delete status=PASS
+[PLAIN] file=repo/todo.c found=1
+[PLAIN] patch=task_count-- status=PASS
+[PLAIN] test=rule_test status=PASS
+[PLAIN] review=final_file status=PASS
+[RESULT] suite=dual target=plain found=1 patch_ok=1 test_ok=1 review_ok=1 initial_size=655 initial_hash=8dc6b9e1 file_size=640 file_hash=c0a6e6a2 status=PASS
+[METRIC] suite=dual target=plain total_ticks=9 files_scanned=122 files_read=125 bytes_read=22319 query_count=2 syscalls=642 polling_loops=5 duplicate_queries=1 found=1 patch_ok=1 test_ok=1 review_ok=1 status=PASS
+$ QEMU: Terminated
+

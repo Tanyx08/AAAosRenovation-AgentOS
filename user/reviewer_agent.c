@@ -205,12 +205,34 @@ main(void)
     if(agent_wait(1, &g_event) < 0)
       exit(1);
     if(g_event.reason == AGENT_WAIT_FILEMOD){
+      if(!got_filemod &&
+         call_tool("query_file",
+                   "tag=delete;module=todo;type=code;keyword=delete",
+                   &g_resp) == AGENT_TOOL_OK){
+        int pos = 0;
+
+        memset(metric_message, 0, sizeof(metric_message));
+        append_str(metric_message, &pos,
+                   "stage=reviewer;status=cache_invalidated;cache_hit=",
+                   sizeof(metric_message));
+        append_uint(metric_message, &pos,
+                    result_uint(g_resp.result, "cache_hit", 0),
+                    sizeof(metric_message));
+        append_str(metric_message, &pos, ";scanned=",
+                   sizeof(metric_message));
+        append_uint(metric_message, &pos,
+                    result_uint(g_resp.result, "index_scanned", 0),
+                    sizeof(metric_message));
+        send_message_to(planner_pid, metric_message);
+        push_context_note("query after FILEMOD", g_resp.result);
+      }
       got_filemod = 1;
       push_context_note("filemod event", g_event.file);
     }
     if(g_event.reason == AGENT_WAIT_MESSAGE){
       if(contains(g_event.message, "cache_probe")){
-        if(call_tool("query_file", "type=code;module=todo;keyword=delete",
+        if(call_tool("query_file",
+                     "tag=delete;module=todo;type=code;keyword=delete",
                      &g_resp) == AGENT_TOOL_OK){
           int pos = 0;
 

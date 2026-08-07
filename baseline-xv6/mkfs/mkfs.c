@@ -15,7 +15,7 @@
 #define static_assert(a, b) do { switch (0) case 0: case (a): ; } while (0)
 #endif
 
-#define NINODES 200
+#define NINODES 300
 
 // Disk layout:
 // [ boot block | sb block | log | inode blocks | free bit map | data blocks ]
@@ -56,6 +56,7 @@ uint ensure_dir(const char *, uint);
 void cache_path(const char *, uint);
 uint lookup_path(const char *);
 void pad_directory(uint);
+void add_codelab_distractors(uint);
 
 // convert to riscv byte order
 ushort
@@ -189,6 +190,8 @@ main(int argc, char *argv[])
 
     close(fd);
   }
+
+  add_codelab_distractors(rootino);
 
   for(i = 0; i < all_dir_count; i++)
     pad_directory(all_dirs[i]);
@@ -412,6 +415,34 @@ pad_directory(uint inum)
   off = ((off / BSIZE) + 1) * BSIZE;
   din.size = xint(off);
   winode(inum, &din);
+}
+
+void
+add_codelab_distractors(uint rootino)
+{
+  static const char *modules[] = {
+    "auth", "store", "net", "parser", "sched", "util", "cache"
+  };
+  uint repo = ensure_dir("repo", rootino);
+
+  for(uint m = 0; m < sizeof(modules) / sizeof(modules[0]); m++){
+    for(int i = 0; i < 8; i++){
+      char name[DIRSIZ + 1];
+      char content[192];
+      uint inum;
+
+      snprintf(name, sizeof(name), "%.5s%02d.c", modules[m], i);
+      snprintf(content, sizeof(content),
+               "// %s module maintenance code\n"
+               "int %s_remove_%02d(int task_count) {\n"
+               "  // delete/remove/count are distractor terms\n"
+               "  return task_count > 0 ? task_count - 1 : 0;\n"
+               "}\n", modules[m], modules[m], i);
+      inum = ialloc(T_FILE);
+      append_dirent(repo, name, inum);
+      iappend(inum, content, strlen(content));
+    }
+  }
 }
 
 void
