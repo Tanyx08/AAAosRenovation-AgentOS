@@ -517,7 +517,9 @@ scheduler(void)
       acquire(&p->lock);
       if(p->state == RUNNABLE) {
         score = agent_schedule_score(p, now);
-        if(score > best_score){
+        // A long-running Agent may have a negative soft-budget score. It must
+        // remain schedulable when it is the best available runnable process.
+        if(best == 0 || score > best_score){
           if(best != 0)
             release(&best->lock);
           best_score = score;
