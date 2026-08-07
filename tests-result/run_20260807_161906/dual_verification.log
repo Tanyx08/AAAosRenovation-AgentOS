@@ -1,0 +1,3 @@
+[VERIFY] suite=dual initial_plain=8dc6b9e1 initial_agentos=8dc6b9e1 initial_equal=1
+[VERIFY] suite=dual final_plain=c0a6e6a2 final_agentos=c0a6e6a2 size_plain=640 size_agentos=640 final_equal=1
+[VERIFY] suite=dual patch_equal=1 test_equal=1 review_equal=1 business_equivalent=1 status=PASS
