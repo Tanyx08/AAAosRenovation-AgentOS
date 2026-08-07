@@ -295,6 +295,20 @@ struct agent_edit_lease {
   uint64 expiry_tick;
 };
 
+struct agent_workflow_metrics {
+  uint64 tool_calls;
+  uint64 syscalls;
+  uint64 messages_received;
+  uint64 query_file_calls;
+  uint64 files_scanned;
+  uint64 index_scanned;
+  uint64 cache_hits;
+  uint64 cache_misses;
+  uint64 duplicate_queries;
+  uint64 wait_calls;
+  uint64 wait_ticks;
+};
+
 struct agent_workflow {
   int used;
   uint64 workflow_id;
@@ -303,6 +317,7 @@ struct agent_workflow {
   int state;
   int member_count;
   uint64 terminate_tick;
+  struct agent_workflow_metrics metrics;
 };
 
 // ---- agent_wait 超时定时器 (修改点 #17) ----
@@ -404,5 +419,13 @@ void agent_heartbeat_wheel_remove(struct proc *p);
 int agent_context_digest_verify(struct proc *p);
 void agent_lease_reap_expired(uint64 now);
 void agent_lease_reap_pid(int pid);
+void agent_workflow_metric_syscall(struct proc *p);
+void agent_workflow_metric_tool_call(struct proc *p, int query_file);
+void agent_workflow_metric_query(struct proc *p, uint64 files_scanned,
+                                 uint64 index_scanned, int cache_hit);
+void agent_workflow_metric_wait(struct proc *p, uint64 wait_ticks,
+                                int message_received);
+int agent_workflow_metrics_get(struct proc *p,
+                               struct agent_workflow_metrics *metrics);
 
 #endif

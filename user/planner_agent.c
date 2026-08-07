@@ -4,9 +4,11 @@
 #include "kernel/agent.h"
 #include "user/user.h"
 #include "user/llm_bridge.h"
+#include "user/dual_result.h"
 
 static struct agent_info g_info;
 static struct agent_tool_response g_resp;
+static struct agent_tool_response g_metrics_resp;
 static struct agent_wait_event g_event;
 static char g_retriever_msg[AGENT_MESSAGE_MAX];
 static char g_patch_msg[AGENT_MESSAGE_MAX];
@@ -22,8 +24,8 @@ static char g_cache_summary[128];
 static char g_sched_summary[160];
 static char g_model_summary[128];
 static char g_context_dump[768];
-static int g_tool_calls;
-static int g_agentos_syscalls;
+static char g_diff_summary[AGENT_TOOL_RESULT_MAX];
+static char g_final_todo[2048];
 
 static int
 contains(const char *s, const char *needle)
@@ -74,12 +76,31 @@ call_tool(const char *tool, const char *params, struct agent_tool_response *resp
 {
   struct agent_tool_request req;
 
-  g_tool_calls++;
-  g_agentos_syscalls++;
   memset(&req, 0, sizeof(req));
   strcpy(req.tool, tool);
   strcpy(req.params, params);
   return tool_call(&req, resp);
+}
+
+static int
+result_uint(const char *result, const char *key, int fallback)
+{
+  int keylen = strlen(key);
+
+  for(const char *p = result; *p; p++){
+    if(memcmp(p, key, keylen) == 0 && p[keylen] == '='){
+      int value = 0;
+      int digits = 0;
+
+      p += keylen + 1;
+      while(*p >= '0' && *p <= '9'){
+        value = value * 10 + *p++ - '0';
+        digits++;
+      }
+      return digits ? value : fallback;
+    }
+  }
+  return fallback;
 }
 
 static void
@@ -225,10 +246,8 @@ read_repo_bug(void)
   int n;
 
   fd = open("/repo/todo.c", O_RDONLY);
-  g_agentos_syscalls++;
   if(fd < 0){
     fd = open("repo/todo.c", O_RDONLY);
-    g_agentos_syscalls++;
   }
   if(fd < 0){
     printf("[Planner-Agent] cannot open /repo/todo.c\n");
@@ -236,9 +255,7 @@ read_repo_bug(void)
   }
   memset(buf, 0, sizeof(buf));
   n = read(fd, buf, sizeof(buf) - 1);
-  g_agentos_syscalls++;
   close(fd);
-  g_agentos_syscalls++;
 
   if(n > 0 && contains(buf, "missing task_count--")){
     printf("[Planner-Agent] read repo bug marker from todo.c\n");
@@ -256,7 +273,6 @@ spawn_agent(const char *prog)
   char *argv[2];
 
   pid = fork();
-  g_agentos_syscalls++;
   if(pid != 0)
     return pid;
 
@@ -274,7 +290,6 @@ spawn_agent_with_arg(const char *prog, char *arg)
   char *argv[3];
 
   pid = fork();
-  g_agentos_syscalls++;
   if(pid != 0)
     return pid;
 
@@ -343,8 +358,25 @@ main(int argc, char **argv)
   int patch_ok;
   int test_ok;
   int review_ok;
+  int files_scanned;
+  int tool_calls;
+  int agent_syscalls;
+  int duplicate_queries;
   int cache_hits;
-  int tool_calls_total;
+  int cache_misses;
+  int query_file_calls;
+  int wait_calls;
+  int wait_ticks;
+  int messages_received;
+  uint32 initial_hash = 0;
+  uint32 final_hash = 0;
+  int initial_size = 0;
+  int final_size = 0;
+  int initial_digest_ok;
+  int final_digest_ok;
+  int final_file_valid;
+  char initial_hash_hex[9];
+  char final_hash_hex[9];
 
   task = "fix todo delete bug";
   if(argc > 1 && strcmp(argv[1], "llm-demo") == 0){
@@ -363,6 +395,12 @@ main(int argc, char **argv)
   }
   agent_sched_set(4, 3);
   agent_watch(AGENT_WATCH_MESSAGE);
+  memset(initial_hash_hex, 0, sizeof(initial_hash_hex));
+  memset(final_hash_hex, 0, sizeof(final_hash_hex));
+  initial_digest_ok =
+    dual_file_digest("repo/todo.c", &initial_hash, &initial_size) == 0;
+  if(initial_digest_ok)
+    dual_hash_hex(initial_hash, initial_hash_hex);
   start_ticks = uptime();
 
   printf("[Planner-Agent] task: %s\n", task);
@@ -517,27 +555,62 @@ main(int argc, char **argv)
   }
 
   call_tool("diff_file", "path=repo/todo.c", &g_resp);
+  copy_limited(g_diff_summary, g_resp.result, sizeof(g_diff_summary));
   context_query(g_context_dump, sizeof(g_context_dump) - 1);
 
   while(wait(&status) > 0)
     ;
-  g_agentos_syscalls++;
+
+  memset(&g_metrics_resp, 0, sizeof(g_metrics_resp));
+  if(call_tool("get_workflow_metrics", "", &g_metrics_resp) != AGENT_TOOL_OK){
+    printf("[Planner-Agent] get_workflow_metrics failed\n");
+    exit(1);
+  }
+  end_ticks = uptime();
+
+  final_digest_ok =
+    dual_file_digest("repo/todo.c", &final_hash, &final_size) == 0;
+  if(final_digest_ok)
+    dual_hash_hex(final_hash, final_hash_hex);
+  memset(g_final_todo, 0, sizeof(g_final_todo));
+  final_file_valid = final_digest_ok &&
+    dual_read_file("repo/todo.c", g_final_todo, sizeof(g_final_todo)) ==
+      final_size &&
+    dual_validate_todo(g_final_todo);
 
   agent_wait(0, 0);
   agent_info(&g_info);
-  end_ticks = uptime();
 
   file_found = contains(g_file_summary, "found") ||
                contains(g_file_summary, "localized");
   patch_ok = contains(g_patch_summary, "patched") ||
-             contains(g_resp.result, "task_count--");
+             contains(g_diff_summary, "task_count--");
   test_ok = contains(g_test_summary, "status=ok") ||
             contains(g_test_summary, "passed=3");
   review_ok = contains(g_review_summary, "approve") ||
               contains(g_review_summary, "status=done");
-  cache_hits = contains(g_cache_summary, "cache_hit=1") ? 1 : 0;
-  agentos_ok = file_found && patch_ok && test_ok && review_ok;
-  tool_calls_total = g_tool_calls + 4; /* worker-side query/read/patch/test calls */
+  patch_ok = patch_ok && final_file_valid;
+  review_ok = review_ok && final_file_valid;
+  agentos_ok = file_found && patch_ok && test_ok && review_ok &&
+               initial_digest_ok && final_digest_ok;
+  files_scanned = result_uint(g_metrics_resp.result, "files_scanned", -1);
+  tool_calls = result_uint(g_metrics_resp.result, "tool_calls", -1);
+  agent_syscalls = result_uint(g_metrics_resp.result, "syscalls", -1);
+  duplicate_queries = result_uint(g_metrics_resp.result,
+                                  "duplicate_queries", -1);
+  cache_hits = result_uint(g_metrics_resp.result, "cache_hits", -1);
+  cache_misses = result_uint(g_metrics_resp.result, "cache_misses", -1);
+  query_file_calls = result_uint(g_metrics_resp.result,
+                                 "query_file_calls", -1);
+  wait_calls = result_uint(g_metrics_resp.result, "wait_calls", -1);
+  wait_ticks = result_uint(g_metrics_resp.result, "wait_ticks", -1);
+  messages_received = result_uint(g_metrics_resp.result,
+                                  "messages_received", -1);
+  if(files_scanned < 0 || tool_calls < 0 || agent_syscalls < 0 ||
+     duplicate_queries < 0 || cache_hits < 0 || cache_misses < 0 ||
+     query_file_calls < 0 || wait_calls < 0 || wait_ticks < 0 ||
+     messages_received < 0)
+    agentos_ok = 0;
 
   printf("[Planner-Agent] final summary\n");
   printf("[Summary] plan: %s\n", g_plan_summary);
@@ -549,7 +622,8 @@ main(int argc, char **argv)
   printf("[Summary] scheduling: %s\n", g_sched_summary);
   printf("[Summary] dynamic tool: run_rule_test_dyn registered and used by Test-Agent\n");
   printf("[Summary] model: %s\n", g_model_summary);
-  printf("[Summary] diff: %s\n", g_resp.result);
+  printf("[Summary] diff: %s\n", g_diff_summary);
+  printf("[Summary] workflow metrics: %s\n", g_metrics_resp.result);
   printf("[AGENTOS] task=fix_todo_delete status=%s\n",
          agentos_ok ? "PASS" : "FAIL");
   printf("[AGENTOS] file=repo/todo.c found=%d\n", file_found);
@@ -557,9 +631,17 @@ main(int argc, char **argv)
          patch_ok ? "PASS" : "FAIL");
   printf("[AGENTOS] test=rule_test status=%s\n",
          test_ok ? "PASS" : "FAIL");
-  printf("[METRIC] suite=dual target=agentos total_ticks=%d files_scanned=1 tool_calls=%d syscalls=%d polling_loops=0 idle_ticks=0 duplicate_queries=1 context_hits=0 cache_hits=%d found=%d patch_ok=%d test_ok=%d review_ok=%d status=%s\n",
-         end_ticks - start_ticks, tool_calls_total, g_agentos_syscalls,
-         cache_hits, file_found, patch_ok, test_ok, review_ok,
+  printf("[AGENTOS] review=final_file status=%s\n",
+         review_ok ? "PASS" : "FAIL");
+  printf("[RESULT] suite=dual target=agentos found=%d patch_ok=%d test_ok=%d review_ok=%d initial_size=%d initial_hash=%s file_size=%d file_hash=%s status=%s\n",
+         file_found, patch_ok, test_ok, review_ok, initial_size,
+         initial_hash_hex, final_size, final_hash_hex,
+         agentos_ok ? "PASS" : "FAIL");
+  printf("[METRIC] suite=dual target=agentos total_ticks=%d files_scanned=%d tool_calls=%d syscalls=%d polling_loops=0 duplicate_queries=%d cache_hits=%d cache_misses=%d query_file_calls=%d wait_calls=%d wait_ticks=%d messages_received=%d found=%d patch_ok=%d test_ok=%d review_ok=%d status=%s\n",
+         end_ticks - start_ticks, files_scanned, tool_calls, agent_syscalls,
+         duplicate_queries, cache_hits, cache_misses, query_file_calls,
+         wait_calls, wait_ticks, messages_received, file_found, patch_ok,
+         test_ok, review_ok,
          agentos_ok ? "PASS" : "FAIL");
   printf("[Context] Planner-Agent path: %s\n", g_context_dump);
   printf("[Agent-Loop] final loop_state=%d\n", g_info.loop_state);

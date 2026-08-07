@@ -334,6 +334,7 @@ agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent,
 {
   struct agent_wait_event event;
   int reason;
+  uint64 wait_start;
 
   if(p->agent_type == AGENT_TYPE_NORMAL)
     return AGENT_TOOL_ERR_NOT_AGENT;
@@ -366,6 +367,7 @@ agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent,
     return AGENT_WAIT_NO_SOURCE;
   }
 
+  wait_start = agent_now_safe();
   memset(&event, 0, sizeof(event));
   acquire(&p->lock);
   p->loop_state = AGENT_LOOP_WAITING;
@@ -387,6 +389,8 @@ agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent,
       p->loop_state = AGENT_LOOP_DONE;
       p->wait_generation++;
       release(&p->lock);
+
+      agent_workflow_metric_wait(p, agent_now_safe() - wait_start, 0);
 
       if(uevent != 0 &&
          copyout(p->pagetable, uevent, (char*)&event, sizeof(event)) < 0)
@@ -429,6 +433,8 @@ agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent,
       p->wait_generation++;
       release(&p->lock);
 
+      agent_workflow_metric_wait(p, agent_now_safe() - wait_start, 1);
+
       if(uevent != 0 &&
          copyout(p->pagetable, uevent, (char*)&event, sizeof(event)) < 0)
         return -1;
@@ -446,6 +452,8 @@ agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent,
       p->wait_generation++;
       release(&p->lock);
 
+      agent_workflow_metric_wait(p, agent_now_safe() - wait_start, 0);
+
       if(uevent != 0 &&
          copyout(p->pagetable, uevent, (char*)&event, sizeof(event)) < 0)
         return -1;
@@ -460,6 +468,8 @@ agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent,
       p->loop_state = AGENT_LOOP_READY;
       p->wait_generation++;
       release(&p->lock);
+
+      agent_workflow_metric_wait(p, agent_now_safe() - wait_start, 0);
 
       if(uevent != 0 &&
          copyout(p->pagetable, uevent, (char*)&event, sizeof(event)) < 0)
@@ -477,6 +487,8 @@ agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent,
         p->wait_generation++;
         release(&p->lock);
 
+        agent_workflow_metric_wait(p, agent_now_safe() - wait_start, 0);
+
         if(uevent != 0 &&
            copyout(p->pagetable, uevent, (char*)&event, sizeof(event)) < 0)
           return -1;
@@ -490,6 +502,8 @@ agent_proc_wait(struct proc *p, int continue_loop, uint64 uevent,
       p->loop_state = AGENT_LOOP_DONE;
       p->wait_generation++;
       release(&p->lock);
+
+      agent_workflow_metric_wait(p, agent_now_safe() - wait_start, 0);
 
       if(uevent != 0 &&
          copyout(p->pagetable, uevent, (char*)&event, sizeof(event)) < 0)

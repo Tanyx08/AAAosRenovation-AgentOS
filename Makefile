@@ -25,6 +25,7 @@ OBJS = \
   $K/agent_fs.o \
   $K/agent_loop.o \
   $K/agent_tool.o \
+  $K/workflow.o \
   $K/sysagent.o \
   $K/bio.o \
   $K/fs.o \

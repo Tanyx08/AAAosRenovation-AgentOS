@@ -498,7 +498,10 @@ void agentfs_tool_query_file(struct proc *p, struct agent_tool_request *req, str
   if(buf == 0 || result == 0){ if(buf) kfree(buf); if(result) kfree(result); tool_resp_set(resp, AGENT_TOOL_ERR_NO_SPACE, "no memory"); return; }
   ptr = buf; left = AGENT_TOOL_RESULT_MAX;
 
-  if(shared_query_cache_lookup(p, req->params, resp)) goto done;
+  if(shared_query_cache_lookup(p, req->params, resp)){
+    agent_workflow_metric_query(p, 0, 0, 1);
+    goto done;
+  }
   file_index_ensure();
   if(file_query_parse(req->params, conds, &cond_count, keyword, sizeof(keyword), &force_scan) < 0)
   { tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "bad params"); goto done; }
@@ -547,6 +550,8 @@ void agentfs_tool_query_file(struct proc *p, struct agent_tool_request *req, str
   shared_query_cache_store(p, req->params, buf);
   query_result_with_cache(result, AGENT_TOOL_RESULT_MAX, buf, 0, p->pid, 1, agent_file_version, full_scanned);
   tool_resp_set(resp, AGENT_TOOL_OK, result);
+  agent_workflow_metric_query(p, index_scanned,
+                              used_index ? index_scanned : 0, 0);
 done:
   kfree(buf); kfree(result);
 }

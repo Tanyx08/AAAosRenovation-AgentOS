@@ -3,6 +3,7 @@
 #include "kernel/fs.h"
 #include "kernel/fcntl.h"
 #include "user/user.h"
+#include "user/dual_result.h"
 
 #define MAX_CONTENT 2048
 #define MAX_PATCHED 2304
@@ -247,13 +248,29 @@ int
 main(void)
 {
   char target[64];
+  char initial_hash_hex[9];
+  char final_hash_hex[9];
+  uint32 initial_hash = 0;
+  uint32 final_hash = 0;
+  int initial_size = 0;
+  int final_size = 0;
+  int final_content_size;
   int start;
   int end;
   int found;
   int patch_ok;
   int test_ok;
+  int review_ok;
+  int initial_digest_ok;
+  int digest_ok;
 
   memset(target, 0, sizeof(target));
+  memset(initial_hash_hex, 0, sizeof(initial_hash_hex));
+  memset(final_hash_hex, 0, sizeof(final_hash_hex));
+  initial_digest_ok =
+    dual_file_digest("repo/todo.c", &initial_hash, &initial_size) == 0;
+  if(initial_digest_ok)
+    dual_hash_hex(initial_hash, initial_hash_hex);
   start = uptime();
   poll_plain_stage();
 
@@ -268,18 +285,32 @@ main(void)
   patch_ok = found && patch_todo_file(target) == 0;
   test_ok = patch_ok && run_rule_test(target);
   end = uptime();
+  digest_ok = found &&
+              dual_file_digest(target, &final_hash, &final_size) == 0;
+  if(digest_ok)
+    dual_hash_hex(final_hash, final_hash_hex);
+  final_content_size = found ?
+    dual_read_file(target, test_todo, sizeof(test_todo)) : -1;
+  patch_ok = patch_ok && final_content_size == final_size &&
+             dual_validate_todo(test_todo);
+  review_ok = found && patch_ok && test_ok && initial_digest_ok && digest_ok;
 
   printf("[PLAIN] task=fix_todo_delete status=%s\n",
-         test_ok ? "PASS" : "FAIL");
+         review_ok ? "PASS" : "FAIL");
   printf("[PLAIN] file=%s found=%d\n", target, found);
   printf("[PLAIN] patch=task_count-- status=%s\n",
          patch_ok ? "PASS" : "FAIL");
   printf("[PLAIN] test=rule_test status=%s\n",
          test_ok ? "PASS" : "FAIL");
-  printf("[METRIC] suite=dual target=plain total_ticks=%d files_scanned=%d syscalls=%d polling_loops=%d idle_ticks=0 duplicate_queries=%d found=%d patch_ok=%d test_ok=%d status=%s\n",
+  printf("[PLAIN] review=final_file status=%s\n",
+         review_ok ? "PASS" : "FAIL");
+  printf("[RESULT] suite=dual target=plain found=%d patch_ok=%d test_ok=%d review_ok=%d initial_size=%d initial_hash=%s file_size=%d file_hash=%s status=%s\n",
+         found, patch_ok, test_ok, review_ok, initial_size, initial_hash_hex,
+         final_size, final_hash_hex, review_ok ? "PASS" : "FAIL");
+  printf("[METRIC] suite=dual target=plain total_ticks=%d files_scanned=%d syscalls=%d polling_loops=%d duplicate_queries=%d found=%d patch_ok=%d test_ok=%d review_ok=%d status=%s\n",
          (int)(end - start), files_scanned, syscalls_count, polling_loops,
-         duplicate_queries, found, patch_ok, test_ok,
-         test_ok ? "PASS" : "FAIL");
+         duplicate_queries, found, patch_ok, test_ok, review_ok,
+         review_ok ? "PASS" : "FAIL");
 
-  exit(test_ok ? 0 : 1);
+  exit(review_ok ? 0 : 1);
 }

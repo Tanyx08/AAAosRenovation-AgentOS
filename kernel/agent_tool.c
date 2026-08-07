@@ -47,6 +47,7 @@ static struct agent_tool_policy builtin_policies[] = {
   {"del_file_attr",       AGENT_CAP_PATCH_FILE,      0, 1, 1},
   {"query_file",          AGENT_CAP_QUERY_FILE,      0, 0, 0},
   {"query_agent",         AGENT_CAP_QUERY_PROCESS,  0, 0, 0},
+  {"get_workflow_metrics", AGENT_CAP_AUDIT_READ,    0, 0, 0},
   {"lease_begin",         AGENT_CAP_LEASE_ACQUIRE,   0, 1, 1},
   {"lease_commit",        AGENT_CAP_LEASE_ACQUIRE,   0, 1, 1},
   {"lease_abort",         AGENT_CAP_LEASE_ACQUIRE,   0, 1, 1},
@@ -229,6 +230,7 @@ static int tool_is_builtin(const char *name)
          streq(name, "del_file_attr") ||
          streq(name, "query_file") ||
          streq(name, "query_agent") ||
+         streq(name, "get_workflow_metrics") ||
          streq(name, "lease_begin") ||
          streq(name, "lease_commit") ||
          streq(name, "lease_abort");
@@ -403,6 +405,55 @@ static void tool_get_system_status(struct agent_tool_response *resp)
   buf_puts(&ptr, &left, ",heartbeat_wakeups="); buf_putu(&ptr, &left, heartbeat_wakeups);
   buf_putc(&ptr, &left, '}');
   tool_resp_set(resp, AGENT_TOOL_OK, buf); kfree(buf);
+}
+
+static void
+tool_get_workflow_metrics(struct proc *p, struct agent_tool_response *resp)
+{
+  struct agent_workflow_metrics metrics;
+  char *result;
+  char *ptr;
+  int left = AGENT_TOOL_RESULT_MAX;
+
+  if(agent_workflow_metrics_get(p, &metrics) != AGENT_TOOL_OK){
+    tool_resp_set(resp, AGENT_TOOL_ERR_SERVICE_GONE,
+                  "workflow metrics unavailable");
+    return;
+  }
+  result = kalloc();
+  if(result == 0){
+    tool_resp_set(resp, AGENT_TOOL_ERR_NO_SPACE, "no memory");
+    return;
+  }
+  memset(result, 0, AGENT_TOOL_RESULT_MAX);
+  ptr = result;
+  buf_puts(&ptr, &left, "{status=ok,workflow_id=");
+  buf_putu(&ptr, &left, p->workflow_id);
+  buf_puts(&ptr, &left, ",tool_calls=");
+  buf_putu(&ptr, &left, metrics.tool_calls);
+  buf_puts(&ptr, &left, ",syscalls=");
+  buf_putu(&ptr, &left, metrics.syscalls);
+  buf_puts(&ptr, &left, ",messages_received=");
+  buf_putu(&ptr, &left, metrics.messages_received);
+  buf_puts(&ptr, &left, ",query_file_calls=");
+  buf_putu(&ptr, &left, metrics.query_file_calls);
+  buf_puts(&ptr, &left, ",files_scanned=");
+  buf_putu(&ptr, &left, metrics.files_scanned);
+  buf_puts(&ptr, &left, ",index_scanned=");
+  buf_putu(&ptr, &left, metrics.index_scanned);
+  buf_puts(&ptr, &left, ",cache_hits=");
+  buf_putu(&ptr, &left, metrics.cache_hits);
+  buf_puts(&ptr, &left, ",cache_misses=");
+  buf_putu(&ptr, &left, metrics.cache_misses);
+  buf_puts(&ptr, &left, ",duplicate_queries=");
+  buf_putu(&ptr, &left, metrics.duplicate_queries);
+  buf_puts(&ptr, &left, ",wait_calls=");
+  buf_putu(&ptr, &left, metrics.wait_calls);
+  buf_puts(&ptr, &left, ",wait_ticks=");
+  buf_putu(&ptr, &left, metrics.wait_ticks);
+  buf_putc(&ptr, &left, '}');
+  tool_resp_set(resp, AGENT_TOOL_OK, result);
+  kfree(result);
 }
 
 static void tool_query_process(struct agent_tool_request *req,
@@ -811,6 +862,10 @@ agent_tool_call(struct proc *p, struct agent_tool_request *req,
     return resp->status;
   }
 
+  // Metrics inspection itself is excluded from business Tool Call totals.
+  if(!streq(req->tool, "get_workflow_metrics"))
+    agent_workflow_metric_tool_call(p, streq(req->tool, "query_file"));
+
   // 修改点 #3: 统一权限检查
   if(!agent_check_tool_permission(p, req->tool)){
     agent_audit_record(p, 0, req->tool, 0, AGENT_TOOL_ERR_PERMISSION, "cap check");
@@ -846,6 +901,8 @@ agent_tool_call(struct proc *p, struct agent_tool_request *req,
     agentfs_tool_query_file(p, req, resp);
   } else if(streq(req->tool, "query_agent")){
     tool_query_agent(p, req, resp);
+  } else if(streq(req->tool, "get_workflow_metrics")){
+    tool_get_workflow_metrics(p, resp);
   } else if(streq(req->tool, "lease_begin")){
     tool_lease_begin(p, req, resp);
   } else if(streq(req->tool, "lease_commit")){
@@ -1008,6 +1065,7 @@ agent_copy_tool_list(struct proc *p, uint64 dst, uint64 len)
            "run_rule_test(target);diff_file(path);"
            "set_file_attr(path,key,value);get_file_attr(path,key);"
            "del_file_attr(path,key);query_agent(role,capability,group);"
+           "get_workflow_metrics();"
            "lease_begin(path);lease_commit(lease_id,expected_version);"
            "lease_abort(lease_id)");
   agent_runtime_init();

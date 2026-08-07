@@ -80,6 +80,27 @@ parse_uint_param(const char *params, const char *key, int *value)
   return 0;
 }
 
+static int
+result_uint(const char *result, const char *key, int fallback)
+{
+  int keylen = strlen(key);
+
+  for(const char *p = result; *p; p++){
+    if(memcmp(p, key, keylen) == 0 && p[keylen] == '='){
+      int value = 0;
+      int digits = 0;
+
+      p += keylen + 1;
+      while(*p >= '0' && *p <= '9'){
+        value = value * 10 + *p++ - '0';
+        digits++;
+      }
+      return digits ? value : fallback;
+    }
+  }
+  return fallback;
+}
+
 static void
 append_str(char *dst, int *pos, const char *src, int max)
 {
@@ -149,9 +170,11 @@ int
 main(void)
 {
   char path[64];
+  char metric_message[AGENT_MESSAGE_MAX];
   int patch_pid;
   int planner_pid;
   int reviewer_pid;
+  int pos;
 
   if((uint64)agent_create(AGENT_TYPE_WORKER, 0, 1024) == 0)
     exit(1);
@@ -180,12 +203,29 @@ main(void)
   }
   push_context_note("query_file(type=code,module=todo,keyword=delete)",
                     g_resp.result);
-  if(contains(g_resp.result, "cache_hit=0"))
-    send_message_to(planner_pid,
-                    "stage=retriever;status=query_cache;cache_hit=0;used_index=1;sched=8/8");
-  else
-    send_message_to(planner_pid,
-                    "stage=retriever;status=query_cache;cache_hit=unknown;sched=8/8");
+  memset(metric_message, 0, sizeof(metric_message));
+  pos = 0;
+  append_str(metric_message, &pos,
+             "stage=retriever;status=query_cache;cache_hit=",
+             sizeof(metric_message));
+  append_uint(metric_message, &pos,
+              result_uint(g_resp.result, "cache_hit", 0),
+              sizeof(metric_message));
+  append_str(metric_message, &pos, ";used_index=", sizeof(metric_message));
+  append_uint(metric_message, &pos,
+              result_uint(g_resp.result, "used_index", 0),
+              sizeof(metric_message));
+  append_str(metric_message, &pos, ";scanned=", sizeof(metric_message));
+  append_uint(metric_message, &pos,
+              result_uint(g_resp.result, "cache_hit", 0) ?
+              result_uint(g_resp.result, "fs_scanned", 0) :
+              result_uint(g_resp.result, "index_scanned", 0),
+              sizeof(metric_message));
+  append_str(metric_message, &pos, ";matches=", sizeof(metric_message));
+  append_uint(metric_message, &pos,
+              result_uint(g_resp.result, "count", 0),
+              sizeof(metric_message));
+  send_message_to(planner_pid, metric_message);
   sleep(5);
   send_message_to(reviewer_pid, "stage=retriever;status=cache_probe");
   sleep(10);

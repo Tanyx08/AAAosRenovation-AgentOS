@@ -20,6 +20,7 @@ CSV_DIR="$OUT_DIR/csv"
 BASELINE_LOG="$RAW_DIR/baseline_plainlab.log"
 AGENTOS_LOG="$RAW_DIR/agentos_planner.log"
 CSV_FILE="$CSV_DIR/dual_codelab.csv"
+VERIFY_FILE="$OUT_DIR/dual_verification.log"
 RUN_SECONDS="${PERF_RUN_SECONDS:-180}"
 TIMEOUT="${PERF_TIMEOUT:-$((RUN_SECONDS + 60))}"
 
@@ -39,15 +40,19 @@ run_qemu_command() {
 }
 
 echo "[HOST] run_id=$RUN_ID"
-echo "[HOST] building baseline-xv6 fs.img"
-(cd "$BASELINE_DIR" && make fs.img)
+echo "[HOST] building baseline-xv6 kernel and fs.img"
+(cd "$BASELINE_DIR" && make -B kernel/kernel fs.img)
 echo "[HOST] running plainlab, raw log: $BASELINE_LOG"
 run_qemu_command "$BASELINE_DIR" "plainlab" "$BASELINE_LOG"
 
-echo "[HOST] building AgentOS fs.img"
-(cd "$ROOT_DIR" && make fs.img)
+echo "[HOST] building AgentOS kernel and fs.img"
+(cd "$ROOT_DIR" && make -B kernel/kernel fs.img)
 echo "[HOST] running planner_agent, raw log: $AGENTOS_LOG"
 run_qemu_command "$ROOT_DIR" "planner_agent" "$AGENTOS_LOG"
+
+echo "[HOST] verifying equivalent business results: $VERIFY_FILE"
+"$SCRIPT_DIR/verify_dual_results.sh" "$BASELINE_LOG" "$AGENTOS_LOG" |
+  tee "$VERIFY_FILE"
 
 echo "[HOST] converting dual metrics to CSV: $CSV_FILE"
 "$SCRIPT_DIR/metrics_to_csv.sh" "$BASELINE_LOG" "$AGENTOS_LOG" > "$CSV_FILE"
@@ -56,3 +61,4 @@ echo "[HOST] done"
 echo "[HOST] baseline_raw=$BASELINE_LOG"
 echo "[HOST] agentos_raw=$AGENTOS_LOG"
 echo "[HOST] csv=$CSV_FILE"
+echo "[HOST] verification=$VERIFY_FILE"
