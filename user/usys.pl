@@ -46,6 +46,7 @@ entry("context_push");
 entry("context_query");
 entry("context_rollback");
 entry("context_clear");
+entry("context_validate");
 entry("agent_heartbeat_set");
 entry("agent_heartbeat_stop");
 entry("agent_watch");

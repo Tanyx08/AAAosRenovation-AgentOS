@@ -502,6 +502,8 @@ writeback(struct vma* v, uint64 addr, int n)
     panic("unmap: not aligned");
   // printf("starting writeback: %p %d\n", addr, n);
   struct file* f = v->file;
+  uint dev = f->ip->dev;
+  uint inum = f->ip->inum;
   int max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE;
   int i = 0;
   while(i < n){
@@ -514,6 +516,10 @@ writeback(struct vma* v, uint64 addr, int n)
     int r = writei(f->ip, 1, addr + i, v->off + v->start - addr + i, n1);
     iunlock(f->ip);
     end_op();
+    if(r <= 0)
+      break;
     i += r;
   }
+  if(i > 0)
+    agent_notify_file_modified(dev, inum);
 }

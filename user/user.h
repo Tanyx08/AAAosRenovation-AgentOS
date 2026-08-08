@@ -45,6 +45,7 @@ int context_push(void*);
 int context_query(void*, uint64);
 int context_rollback(uint64);
 int context_clear(void);
+int context_validate(uint64, void*);
 int agent_heartbeat_set(int);
 int agent_heartbeat_stop(void);
 int agent_watch(int);

@@ -176,7 +176,9 @@ filewrite(struct file *f, uint64 addr, int n)
       i += r;
     }
     ret = (i == n ? n : -1);
-    if(ret > 0)
+    // A short write may still have changed the inode even if this xv6 path
+    // reports failure, so notify once whenever at least one byte was written.
+    if(i > 0)
       agent_notify_file_modified(dev, inum);
   } else {
     panic("filewrite");

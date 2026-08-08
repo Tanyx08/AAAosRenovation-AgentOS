@@ -684,6 +684,10 @@ agent_notify_file_modified(uint dev, uint inum)
   struct proc *p;
   uint64 now = agent_now_safe();
 
+  // All successful content-write paths converge here, so each notification
+  // advances the object version exactly once before watchers are awakened.
+  agentfs_inode_version_bump(dev, inum);
+
   for(p = proc; p < &proc[NPROC]; p++){
     acquire(&p->lock);
     if(p->state != UNUSED &&

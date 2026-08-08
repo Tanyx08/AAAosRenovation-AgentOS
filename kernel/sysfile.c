@@ -193,6 +193,8 @@ sys_unlink(void)
   struct dirent de;
   char name[DIRSIZ], path[MAXPATH];
   uint off;
+  uint removed_dev = 0, removed_inum = 0;
+  int object_removed = 0;
 
   if(argstr(0, path, MAXPATH) < 0)
     return -1;
@@ -231,9 +233,17 @@ sys_unlink(void)
 
   ip->nlink--;
   iupdate(ip);
+  if(ip->nlink == 0){
+    removed_dev = ip->dev;
+    removed_inum = ip->inum;
+    object_removed = 1;
+  }
   iunlockput(ip);
 
   end_op();
+
+  if(object_removed)
+    agentfs_inode_version_remove(removed_dev, removed_inum);
 
   return 0;
 

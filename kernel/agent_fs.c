@@ -24,6 +24,7 @@
 #define AGENT_FILE_QUERY_COND_MAX (6)
 #define AGENT_FILE_POSTING_MAX (AGENT_FILE_META_MAX * INODE_ATTR_MAX)
 #define AGENT_SHARED_QUERY_CACHE_MAX (8)
+#define AGENT_FILE_VERSION_MAX (256)
 #define MAX2(a, b) ((a) > (b) ? (a) : (b))
 
 struct agent_file_meta {
@@ -59,6 +60,14 @@ struct shared_query_cache {
   uint64 version;
 };
 
+struct agent_file_version {
+  int used;
+  uint dev;
+  uint inum;
+  uint64 version;
+  int deleted;
+};
+
 static struct spinlock agent_file_lock;
 static int agent_file_ready;
 static int agent_file_index_ready;
@@ -66,9 +75,11 @@ static struct agent_file_meta file_meta[AGENT_FILE_META_MAX];
 static struct agent_file_posting file_postings[AGENT_FILE_POSTING_MAX];
 static int file_index[AGENT_FILE_INDEX_BUCKETS];
 static struct spinlock agent_fs_runtime_lock;
+static struct spinlock agent_file_version_lock;
 static int agent_fs_runtime_ready;
 static uint64 agent_file_version = 1;
 static struct shared_query_cache shared_query_cache[AGENT_SHARED_QUERY_CACHE_MAX];
+static struct agent_file_version file_versions[AGENT_FILE_VERSION_MAX];
 
 // 修改点 #8: 缓存命中统计
 static uint64 shared_cache_hits = 0;
@@ -121,7 +132,83 @@ static void agent_fs_runtime_init(void)
 {
   if(agent_fs_runtime_ready) return;
   initlock(&agent_fs_runtime_lock, "agent_fs_runtime");
+  initlock(&agent_file_version_lock, "agent_file_version");
   agent_fs_runtime_ready = 1;
+}
+
+static struct agent_file_version *
+file_version_find_locked(uint dev, uint inum, int create)
+{
+  struct agent_file_version *free_slot = 0;
+
+  for(int i = 0; i < AGENT_FILE_VERSION_MAX; i++){
+    struct agent_file_version *entry = &file_versions[i];
+
+    if(entry->used && entry->dev == dev && entry->inum == inum)
+      return entry;
+    if(!entry->used && free_slot == 0)
+      free_slot = entry;
+  }
+  if(!create || free_slot == 0)
+    return 0;
+  memset(free_slot, 0, sizeof(*free_slot));
+  free_slot->used = 1;
+  free_slot->dev = dev;
+  free_slot->inum = inum;
+  free_slot->version = 1;
+  return free_slot;
+}
+
+uint64
+agentfs_inode_version_get(uint dev, uint inum)
+{
+  struct agent_file_version *entry;
+  uint64 version = 0;
+
+  agent_fs_runtime_init();
+  acquire(&agent_file_version_lock);
+  entry = file_version_find_locked(dev, inum, 1);
+  if(entry != 0 && !entry->deleted)
+    version = entry->version;
+  release(&agent_file_version_lock);
+  return version;
+}
+
+uint64
+agentfs_inode_version_bump(uint dev, uint inum)
+{
+  struct agent_file_version *entry;
+  uint64 version = 0;
+
+  agent_fs_runtime_init();
+  acquire(&agent_file_version_lock);
+  entry = file_version_find_locked(dev, inum, 1);
+  if(entry != 0){
+    entry->deleted = 0;
+    entry->version++;
+    if(entry->version == 0)
+      entry->version = 1;
+    version = entry->version;
+  }
+  release(&agent_file_version_lock);
+  return version;
+}
+
+void
+agentfs_inode_version_remove(uint dev, uint inum)
+{
+  struct agent_file_version *entry;
+
+  agent_fs_runtime_init();
+  acquire(&agent_file_version_lock);
+  entry = file_version_find_locked(dev, inum, 1);
+  if(entry != 0){
+    entry->version++;
+    if(entry->version == 0)
+      entry->version = 1;
+    entry->deleted = 1;
+  }
+  release(&agent_file_version_lock);
 }
 
 static void agent_file_init(void)

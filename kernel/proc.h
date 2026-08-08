@@ -32,6 +32,15 @@ struct cpu {
   int normal_burst_count;      // 连续普通进程运行计数
 };
 
+// Kernel-only dependency metadata parallel to Context Path nodes.
+struct agent_context_dep {
+  int used;
+  uint64 sequence;
+  uint dev;
+  uint inum;
+  uint64 version;
+};
+
 extern struct cpu cpus[NCPU];
 
 // per-process data for the trap handling code in trampoline.S.
@@ -148,6 +157,11 @@ struct proc {
   uint64 runnable_since;
   uint16 context_offsets[AGENT_CONTEXT_MAX_NODES];
   uint16 context_lengths[AGENT_CONTEXT_MAX_NODES];
+  struct agent_context_dep context_deps[AGENT_CONTEXT_MAX_NODES];
+  int pending_context_dep;
+  uint pending_context_dev;
+  uint pending_context_inum;
+  uint64 pending_context_version;
   int watch_mask;
   int pending_events;
   int last_wakeup_reason;

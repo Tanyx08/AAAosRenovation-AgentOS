@@ -400,6 +400,11 @@ agent_init_proc(struct proc *p)
   p->runnable_since = 0;
   memset(p->context_offsets, 0, sizeof(p->context_offsets));
   memset(p->context_lengths, 0, sizeof(p->context_lengths));
+  memset(p->context_deps, 0, sizeof(p->context_deps));
+  p->pending_context_dep = 0;
+  p->pending_context_dev = 0;
+  p->pending_context_inum = 0;
+  p->pending_context_version = 0;
   p->watch_mask = 0;
   p->pending_events = 0;
   p->last_wakeup_reason = AGENT_EVENT_NONE;
@@ -472,6 +477,11 @@ agent_after_fork(struct proc *dst, struct proc *src)
   dst->runnable_since = 0;
   memset(dst->context_offsets, 0, sizeof(dst->context_offsets));
   memset(dst->context_lengths, 0, sizeof(dst->context_lengths));
+  memset(dst->context_deps, 0, sizeof(dst->context_deps));
+  dst->pending_context_dep = 0;
+  dst->pending_context_dev = 0;
+  dst->pending_context_inum = 0;
+  dst->pending_context_version = 0;
   dst->watch_mask = 0;                      // fork 不继承 watch
   dst->pending_events = 0;
   dst->last_wakeup_reason = AGENT_EVENT_NONE;
@@ -527,6 +537,33 @@ agent_after_fork(struct proc *dst, struct proc *src)
 
   dst->last_context_query = 0;
   dst->context_reuse_hit = 0;
+}
+
+// exec replaces the user page table. Keep workflow identity, but discard the
+// inherited Context mapping so the new Agent program allocates a private one.
+void
+agent_after_exec(struct proc *p)
+{
+  p->context_region_start = 0;
+  p->context_region_size = 0;
+  p->context_path_len = 0;
+  p->context_node_count = 0;
+  p->context_dropped_nodes = 0;
+  p->context_generation = 0;
+  p->context_first_sequence = 0;
+  p->context_next_sequence = 1;
+  memset(p->context_offsets, 0, sizeof(p->context_offsets));
+  memset(p->context_lengths, 0, sizeof(p->context_lengths));
+  memset(p->context_deps, 0, sizeof(p->context_deps));
+  memset(p->context_digests, 0, sizeof(p->context_digests));
+  p->context_digest_head = 0;
+  p->context_digest_count = 0;
+  p->pending_context_dep = 0;
+  p->pending_context_dev = 0;
+  p->pending_context_inum = 0;
+  p->pending_context_version = 0;
+  p->last_context_query = 0;
+  p->context_reuse_hit = 0;
 }
 
 uint64

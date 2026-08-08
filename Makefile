@@ -221,6 +221,7 @@ UPROGS=\
 	$U/_agentfsbench\
 	$U/_agentfsmetric\
 	$U/_contextmetric\
+	$U/_ctxvermetric\
 	$U/_waitmetric\
 	$U/_schedmetric\
 	$U/_mailbench\

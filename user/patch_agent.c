@@ -137,6 +137,7 @@ int
 main(void)
 {
   int test_pid;
+  int retriever_pid;
   int planner_pid;
   int pos;
 
@@ -154,6 +155,7 @@ main(void)
   push_context_note("planner message", "received patch setup");
 
   if(parse_uint_param(g_event.message, "test_pid", &test_pid) < 0 ||
+     parse_uint_param(g_event.message, "retriever_pid", &retriever_pid) < 0 ||
      parse_uint_param(g_event.message, "planner_pid", &planner_pid) < 0 ||
      param_value(g_event.message, "path", g_warm_path, sizeof(g_warm_path)) < 0){
     exit(1);
@@ -184,6 +186,10 @@ main(void)
     exit(1);
   }
   push_context_note("patch_file", g_resp.result);
+
+  if(send_message_to(retriever_pid,
+                     "stage=patch;status=validate_context;file=repo/todo.c") < 0)
+    exit(1);
 
   if(send_message_to(test_pid, "path=repo/todo.c;status=patched") < 0){
     exit(1);

@@ -133,6 +133,7 @@ extern uint64 sys_agent_query_agent(void);
 extern uint64 sys_agent_role_set(void);
 extern uint64 sys_agent_context_verify(void);
 extern uint64 sys_agent_cascade_kill(void);
+extern uint64 sys_context_validate(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -190,6 +191,7 @@ static uint64 (*syscalls[])(void) = {
 [SYS_agent_role_set] sys_agent_role_set,
 [SYS_agent_context_verify] sys_agent_context_verify,
 [SYS_agent_cascade_kill] sys_agent_cascade_kill,
+[SYS_context_validate] sys_context_validate,
 };
 
 void
@@ -200,7 +202,7 @@ syscall(void)
 
   num = p->trapframe->a7;
   if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
-    if(num >= SYS_agent_info && num <= SYS_agent_cascade_kill)
+    if(num >= SYS_agent_info && num <= SYS_context_validate)
       agent_workflow_metric_syscall(p);
     // Use num to lookup the system call function for num, call it,
     // and store its return value in p->trapframe->a0

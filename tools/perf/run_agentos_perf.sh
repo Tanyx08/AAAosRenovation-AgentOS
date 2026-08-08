@@ -24,6 +24,7 @@ case "$MODE" in
     COMMANDS=(
       "agentfsmetric"
       "contextmetric"
+      "ctxvermetric"
       "waitmetric"
       "schedmetric"
       "mailbench"
@@ -34,6 +35,7 @@ case "$MODE" in
     COMMANDS=(
       "agentfsmetric small"
       "contextmetric"
+      "ctxvermetric small"
       "waitmetric small"
       "schedmetric small"
       "mailbench small"
@@ -44,6 +46,7 @@ case "$MODE" in
     COMMANDS=(
       "agentfsmetric full"
       "contextmetric"
+      "ctxvermetric full"
       "waitmetric full"
       "schedmetric full"
       "mailbench full"

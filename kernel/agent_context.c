@@ -125,6 +125,7 @@ agent_evict_oldest(struct proc *p)
 
   if(p->context_node_count == 0){
     p->context_path_len = 0;
+    memset(p->context_deps, 0, sizeof(p->context_deps));
     return;
   }
   first_len = p->context_lengths[0];
@@ -137,6 +138,7 @@ agent_evict_oldest(struct proc *p)
        copyout(p->pagetable, base + copied, tmp, chunk) < 0){
       p->context_path_len = 0;
       p->context_node_count = 0;
+      memset(p->context_deps, 0, sizeof(p->context_deps));
       return;
     }
     copied += chunk;
@@ -145,9 +147,15 @@ agent_evict_oldest(struct proc *p)
   for(uint64 i = 1; i < p->context_node_count; i++){
     p->context_offsets[i - 1] = p->context_offsets[i] - first_len;
     p->context_lengths[i - 1] = p->context_lengths[i];
+    p->context_deps[i - 1] = p->context_deps[i];
   }
-  if(p->context_node_count > 0)
+  if(p->context_node_count > 0){
     p->context_node_count--;
+    p->context_offsets[p->context_node_count] = 0;
+    p->context_lengths[p->context_node_count] = 0;
+    memset(&p->context_deps[p->context_node_count], 0,
+           sizeof(p->context_deps[0]));
+  }
   p->context_dropped_nodes++;
   p->context_first_sequence++; // 首个淘汰后递增
 }
@@ -184,6 +192,11 @@ agent_context_clear(struct proc *p)
   p->context_next_sequence = 1;
   memset(p->context_offsets, 0, sizeof(p->context_offsets));
   memset(p->context_lengths, 0, sizeof(p->context_lengths));
+  memset(p->context_deps, 0, sizeof(p->context_deps));
+  p->pending_context_dep = 0;
+  p->pending_context_dev = 0;
+  p->pending_context_inum = 0;
+  p->pending_context_version = 0;
   if(p->context_region_start == 0 || p->context_region_size == 0)
     return;
   memset(zero, 0, sizeof(zero));
@@ -206,15 +219,29 @@ agent_context_clear(struct proc *p)
 int
 agent_context_push_node(struct proc *p, struct agent_context_node *node)
 {
+  struct agent_context_dep pending_dep;
   char record[AGENT_CONTEXT_REQ_MAX + AGENT_CONTEXT_RES_MAX + 128];
   char *ptr = record;
   int left = sizeof(record);
   uint64 rec_len;
   uint64 base;
 
+  memset(&pending_dep, 0, sizeof(pending_dep));
+  if(p->pending_context_dep){
+    pending_dep.used = 1;
+    pending_dep.dev = p->pending_context_dev;
+    pending_dep.inum = p->pending_context_inum;
+    pending_dep.version = p->pending_context_version;
+  }
+  p->pending_context_dep = 0;
+  p->pending_context_dev = 0;
+  p->pending_context_inum = 0;
+  p->pending_context_version = 0;
+
   if(p->context_region_start == 0)
     return -1;
   node->sequence = p->context_next_sequence;
+  pending_dep.sequence = node->sequence;
 
   memset(record, 0, sizeof(record));
   // 修改点 #7/#19: 扩展的记录格式
@@ -257,6 +284,7 @@ agent_context_push_node(struct proc *p, struct agent_context_node *node)
 
   p->context_offsets[p->context_node_count] = p->context_path_len;
   p->context_lengths[p->context_node_count] = rec_len;
+  p->context_deps[p->context_node_count] = pending_dep;
   p->context_path_len += rec_len;
   p->context_node_count++;
 
@@ -290,6 +318,49 @@ agent_context_query(struct proc *p, uint64 dst, uint64 len)
   return n;
 }
 
+int
+agent_context_validate(struct proc *p, uint64 sequence, uint64 dst)
+{
+  struct agent_context_validation result;
+  struct agent_context_dep *dep = 0;
+
+  memset(&result, 0, sizeof(result));
+  result.state = AGENT_CONTEXT_NOT_FOUND;
+
+  // Sequence zero is a convenience for callers that need to capture the
+  // dependency created by the immediately preceding Tool Call.
+  if(sequence == 0 && p->context_node_count > 0)
+    sequence = p->context_deps[p->context_node_count - 1].sequence;
+  result.sequence = sequence;
+
+  for(uint64 i = 0; i < p->context_node_count; i++){
+    if(p->context_deps[i].sequence == sequence){
+      dep = &p->context_deps[i];
+      break;
+    }
+  }
+  if(dep != 0){
+    if(!dep->used){
+      result.state = AGENT_CONTEXT_NO_DEP;
+    } else {
+      result.dev = dep->dev;
+      result.inum = dep->inum;
+      result.recorded_version = dep->version;
+      result.current_version = agentfs_inode_version_get(dep->dev, dep->inum);
+      if(result.current_version == 0)
+        result.state = AGENT_CONTEXT_DELETED;
+      else if(result.current_version != result.recorded_version)
+        result.state = AGENT_CONTEXT_STALE;
+      else
+        result.state = AGENT_CONTEXT_VALID;
+    }
+  }
+
+  if(copyout(p->pagetable, dst, (char *)&result, sizeof(result)) < 0)
+    return -1;
+  return 0;
+}
+
 // 修改点 #7: rollback 后 generation 递增
 int
 agent_context_rollback(struct proc *p, uint64 keep_nodes)
@@ -306,6 +377,12 @@ agent_context_rollback(struct proc *p, uint64 keep_nodes)
                         p->context_lengths[keep_nodes - 1];
   p->context_node_count = keep_nodes;
   p->context_next_sequence = p->context_first_sequence + keep_nodes;
+  for(uint64 i = keep_nodes; i < AGENT_CONTEXT_MAX_NODES; i++)
+    memset(&p->context_deps[i], 0, sizeof(p->context_deps[i]));
+  p->pending_context_dep = 0;
+  p->pending_context_dev = 0;
+  p->pending_context_inum = 0;
+  p->pending_context_version = 0;
   p->loop_state = AGENT_LOOP_ROLLED_BACK;
   // 摘要中可能包含已经回滚的节点；清空可防止旧记录被误当成有效证据。
   memset(p->context_digests, 0, sizeof(p->context_digests));

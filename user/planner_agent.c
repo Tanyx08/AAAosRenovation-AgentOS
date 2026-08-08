@@ -23,6 +23,7 @@ static char g_review_summary[96];
 static char g_cache_summary[128];
 static char g_sched_summary[160];
 static char g_model_summary[128];
+static char g_context_coherence_summary[160];
 static char g_context_dump[768];
 static char g_diff_summary[AGENT_TOOL_RESULT_MAX];
 static char g_final_todo[2048];
@@ -209,6 +210,12 @@ print_worker_event(const char *message)
   } else if(contains(message, "stage=retriever") &&
             contains(message, "status=found_bug")){
     printf("[Retriever-Agent] read_file repo/todo.c -> found missing task_count--\n");
+  } else if(contains(message, "stage=retriever") &&
+            contains(message, "status=context_stale")){
+    printf("[Context-Coherence] Retriever validated old observation -> STALE\n");
+  } else if(contains(message, "stage=retriever") &&
+            contains(message, "status=context_valid")){
+    printf("[Context-Coherence] Retriever re-read changed file -> VALID\n");
   } else if(contains(message, "stage=patch") &&
             contains(message, "status=patched")){
     printf("[Patch-Agent] patch_file repo/todo.c replace BUG with task_count--\n");
@@ -353,6 +360,7 @@ main(int argc, char **argv)
   int tool_pid;
   int status = 0;
   int got_review = 0;
+  int got_context_valid = 0;
   int pos;
   int start_ticks;
   int end_ticks;
@@ -420,6 +428,8 @@ main(int argc, char **argv)
   copy_limited(g_sched_summary,
                "planner=4/3 retriever=8/8 patch=8/7 test=5/4 reviewer=7/6 tool=4/3",
                sizeof(g_sched_summary));
+  copy_limited(g_context_coherence_summary, "pending",
+               sizeof(g_context_coherence_summary));
   if(model_mode == 1)
     copy_limited(g_model_summary, "llm-demo bridge plan, rule executor",
                  sizeof(g_model_summary));
@@ -495,6 +505,8 @@ main(int argc, char **argv)
              "role=patch;path=repo/todo.c;test_pid=",
              sizeof(g_patch_msg));
   append_uint(g_patch_msg, &pos, test_pid, sizeof(g_patch_msg));
+  append_str(g_patch_msg, &pos, ";retriever_pid=", sizeof(g_patch_msg));
+  append_uint(g_patch_msg, &pos, retriever_pid, sizeof(g_patch_msg));
   append_str(g_patch_msg, &pos, ";planner_pid=", sizeof(g_patch_msg));
   append_uint(g_patch_msg, &pos, getpid(), sizeof(g_patch_msg));
   memset(g_test_msg, 0, sizeof(g_test_msg));
@@ -519,7 +531,7 @@ main(int argc, char **argv)
   printf("[Kernel-AgentLoop] MESSAGE -> wakeup Retriever-Agent\n");
   push_context_note("dispatch workers", "initial role messages sent");
 
-  while(!got_review){
+  while(!got_review || !got_context_valid){
     char stage[24];
     char status_value[64];
 
@@ -555,6 +567,18 @@ main(int argc, char **argv)
         copy_limited(g_cache_summary,
                      "retriever first query cache_hit=0; waiting reviewer cache probe",
                      sizeof(g_cache_summary));
+      }
+      if(contains(g_event.message, "stage=retriever") &&
+         contains(g_event.message, "status=context_stale"))
+        copy_limited(g_context_coherence_summary,
+                     "old read dependency became STALE",
+                     sizeof(g_context_coherence_summary));
+      if(contains(g_event.message, "stage=retriever") &&
+         contains(g_event.message, "status=context_valid")){
+        copy_limited(g_context_coherence_summary,
+                     "re-read dependency is VALID",
+                     sizeof(g_context_coherence_summary));
+        got_context_valid = 1;
       }
     } else if(contains(g_event.message, "target=todo_delete")){
       copy_limited(g_test_summary, g_event.message, sizeof(g_test_summary));
@@ -632,6 +656,8 @@ main(int argc, char **argv)
   printf("[Summary] test: %s\n", g_test_summary);
   printf("[Summary] review: %s\n", g_review_summary);
   printf("[Summary] shared cache: %s\n", g_cache_summary);
+  printf("[Summary] context coherence: %s\n",
+         g_context_coherence_summary);
   printf("[Summary] scheduling: %s\n", g_sched_summary);
   printf("[Summary] dynamic tool: run_rule_test_dyn registered and used by Test-Agent\n");
   printf("[Summary] model: %s\n", g_model_summary);

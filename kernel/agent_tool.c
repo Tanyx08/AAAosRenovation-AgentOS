@@ -207,6 +207,42 @@ static int read_file_content(const char *path, char *buf, int bufsz)
   buf[n] = 0; return n;
 }
 
+static int
+read_file_content_versioned(const char *path, char *buf, int bufsz,
+                            uint *dev, uint *inum, uint64 *version)
+{
+  struct inode *ip;
+  int n;
+
+  if(bufsz <= 0)
+    return -1;
+  begin_op();
+  ip = namei((char*)path);
+  if(ip == 0){
+    end_op();
+    return -1;
+  }
+  ilock(ip);
+  if(ip->type != T_FILE){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+  memset(buf, 0, bufsz);
+  n = readi(ip, 0, (uint64)buf, 0, bufsz - 1);
+  if(n >= 0){
+    *dev = ip->dev;
+    *inum = ip->inum;
+    *version = agentfs_inode_version_get(ip->dev, ip->inum);
+  }
+  iunlockput(ip);
+  end_op();
+  if(n < 0)
+    return -1;
+  buf[n] = 0;
+  return n;
+}
+
 static void tool_resp_set(struct agent_tool_response *resp, int status, const char *result)
 {
   memset(resp, 0, sizeof(*resp));
@@ -527,6 +563,8 @@ static void tool_read_file(struct proc *p, struct agent_tool_request *req,
 {
   char path[64], *content, *buf, *ptr;
   int left = AGENT_TOOL_RESULT_MAX, n;
+  uint dev, inum;
+  uint64 version;
   if(param_value(req->params, "path", path, sizeof(path)) < 0){
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "bad params"); return;
   }
@@ -536,10 +574,15 @@ static void tool_read_file(struct proc *p, struct agent_tool_request *req,
     if(buf) kfree(buf);
     tool_resp_set(resp, AGENT_TOOL_ERR_NO_SPACE, "no memory"); return;
   }
-  n = read_file_content(path, content, AGENT_TOOL_RESULT_MAX);
+  n = read_file_content_versioned(path, content, AGENT_TOOL_RESULT_MAX,
+                                  &dev, &inum, &version);
   if(n < 0){ kfree(content); kfree(buf);
     tool_resp_set(resp, AGENT_TOOL_ERR_BAD_PARAM, "file not found"); return;
   }
+  p->pending_context_dep = 1;
+  p->pending_context_dev = dev;
+  p->pending_context_inum = inum;
+  p->pending_context_version = version;
   agent_workflow_metric_file_read(p, n);
   ptr = buf; memset(buf, 0, AGENT_TOOL_RESULT_MAX);
   buf_puts(&ptr, &left, "{status=ok,path="); buf_puts(&ptr, &left, path);
@@ -866,6 +909,13 @@ agent_tool_call(struct proc *p, struct agent_tool_request *req,
     tool_resp_set(resp, AGENT_TOOL_ERR_NOT_AGENT, "process is not agent");
     return resp->status;
   }
+
+  // A dependency belongs to exactly one automatically generated Context node.
+  // Clearing here prevents a failed prior push from contaminating this call.
+  p->pending_context_dep = 0;
+  p->pending_context_dev = 0;
+  p->pending_context_inum = 0;
+  p->pending_context_version = 0;
 
   // Metrics inspection itself is excluded from business Tool Call totals.
   if(!streq(req->tool, "get_workflow_metrics"))

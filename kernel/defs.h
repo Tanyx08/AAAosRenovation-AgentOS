@@ -53,6 +53,9 @@ int             fileread(struct file*, uint64, int n);
 int             filestat(struct file*, uint64 addr);
 int             filewrite(struct file*, uint64, int n);
 void            agent_notify_file_modified(uint, uint);
+uint64          agentfs_inode_version_get(uint, uint);
+uint64          agentfs_inode_version_bump(uint, uint);
+void            agentfs_inode_version_remove(uint, uint);
 
 // fs.c
 void            fsinit(int);
@@ -240,6 +243,7 @@ void            kcsaninit();
 
 // ---- AgentOS 决赛新增声明 (修改点 #1-#24) ----
 void            agent_global_init(void);
+void            agent_after_exec(struct proc*);
 int             agent_send_message(struct proc*, int, int, const char*, uint64);
 int             agent_proc_query_agent(struct proc*, int, int, int, uint64, uint64);
 int             agent_proc_cap_set(struct proc*, uint64);

@@ -74,6 +74,16 @@ sys_context_clear(void)
 { agent_context_clear(myproc()); return 0; }
 
 uint64
+sys_context_validate(void)
+{
+  uint64 sequence, result;
+
+  argaddr(0, &sequence);
+  argaddr(1, &result);
+  return agent_context_validate(myproc(), sequence, result);
+}
+
+uint64
 sys_agent_heartbeat_set(void)
 { int interval; argint(0, &interval); return agent_proc_heartbeat_set(myproc(), interval); }
 

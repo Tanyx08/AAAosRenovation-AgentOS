@@ -169,14 +169,18 @@ push_context_note(const char *request, const char *result)
 int
 main(void)
 {
+  struct agent_context_validation validation;
   char path[64];
+  char read_params[96];
   char metric_message[AGENT_MESSAGE_MAX];
+  uint64 read_sequence;
+  uint64 refreshed_sequence;
   int patch_pid;
   int planner_pid;
   int reviewer_pid;
   int pos;
 
-  if((uint64)agent_create(AGENT_TYPE_WORKER, 0, 1024) == 0)
+  if((uint64)agent_create(AGENT_TYPE_WORKER, 0, 4096) == 0)
     exit(1);
   if(agent_role_set(AGENT_ROLE_RETRIEVER) < 0)
     exit(1);
@@ -232,13 +236,25 @@ main(void)
   send_message_to(reviewer_pid, "stage=retriever;status=cache_probe");
   sleep(10);
 
-  if(call_tool("read_file", "path=repo/todo.c", &g_resp) != AGENT_TOOL_OK){
+  memset(read_params, 0, sizeof(read_params));
+  pos = 0;
+  append_str(read_params, &pos, "path=", sizeof(read_params));
+  append_str(read_params, &pos, path, sizeof(read_params));
+  if(call_tool("read_file", read_params, &g_resp) != AGENT_TOOL_OK){
     printf("retriever_agent: read_file failed\n");
     send_message_to(planner_pid, "stage=retriever;status=read_failed");
     exit(1);
   }
   if(!contains(g_resp.result, "delete_task"))
     send_message_to(planner_pid, "stage=retriever;status=read_truncated");
+  memset(&validation, 0, sizeof(validation));
+  if(context_validate(0, &validation) < 0 ||
+     validation.state != AGENT_CONTEXT_VALID){
+    printf("[Context-Coherence] capture read dependency failed state=%d seq=%d\n",
+           validation.state, (int)validation.sequence);
+    exit(1);
+  }
+  read_sequence = validation.sequence;
   push_context_note("read_file(path=repo/todo.c)",
                     "delete_task misses task_count--");
 
@@ -248,5 +264,57 @@ main(void)
   }
   send_message_to(planner_pid, "stage=retriever;status=found_bug;file=repo/todo.c");
   push_context_note("send_message(patch)", "forwarded patch request");
+
+  memset(&g_event, 0, sizeof(g_event));
+  if(agent_wait(1, &g_event) < 0 || g_event.reason != AGENT_WAIT_MESSAGE ||
+     !contains(g_event.message, "status=validate_context"))
+    exit(1);
+
+  memset(&validation, 0, sizeof(validation));
+  if(context_validate(read_sequence, &validation) < 0 ||
+     validation.state != AGENT_CONTEXT_STALE)
+    exit(1);
+  printf("[Context-Coherence] seq=%d file=%s recorded_version=%d current_version=%d state=STALE\n",
+         (int)read_sequence, path, (int)validation.recorded_version,
+         (int)validation.current_version);
+  memset(metric_message, 0, sizeof(metric_message));
+  pos = 0;
+  append_str(metric_message, &pos,
+             "stage=retriever;status=context_stale;seq=",
+             sizeof(metric_message));
+  append_uint(metric_message, &pos, read_sequence, sizeof(metric_message));
+  append_str(metric_message, &pos, ";recorded=", sizeof(metric_message));
+  append_uint(metric_message, &pos, validation.recorded_version,
+              sizeof(metric_message));
+  append_str(metric_message, &pos, ";current=", sizeof(metric_message));
+  append_uint(metric_message, &pos, validation.current_version,
+              sizeof(metric_message));
+  send_message_to(planner_pid, metric_message);
+
+  if(call_tool("read_file", read_params, &g_resp) != AGENT_TOOL_OK)
+    exit(1);
+  memset(&validation, 0, sizeof(validation));
+  if(context_validate(0, &validation) < 0 ||
+     validation.state != AGENT_CONTEXT_VALID)
+    exit(1);
+  refreshed_sequence = validation.sequence;
+  printf("[Context-Coherence] seq=%d file=%s recorded_version=%d current_version=%d state=VALID\n",
+         (int)refreshed_sequence, path, (int)validation.recorded_version,
+         (int)validation.current_version);
+  memset(metric_message, 0, sizeof(metric_message));
+  pos = 0;
+  append_str(metric_message, &pos,
+             "stage=retriever;status=context_valid;seq=",
+             sizeof(metric_message));
+  append_uint(metric_message, &pos, refreshed_sequence,
+              sizeof(metric_message));
+  append_str(metric_message, &pos, ";recorded=", sizeof(metric_message));
+  append_uint(metric_message, &pos, validation.recorded_version,
+              sizeof(metric_message));
+  append_str(metric_message, &pos, ";current=", sizeof(metric_message));
+  append_uint(metric_message, &pos, validation.current_version,
+              sizeof(metric_message));
+  send_message_to(planner_pid, metric_message);
+  push_context_note("context_validate", "stale observation refreshed");
   exit(0);
 }

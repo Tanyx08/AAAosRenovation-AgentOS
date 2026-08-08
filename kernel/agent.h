@@ -98,6 +98,13 @@
 // ---- Context 复用与共享缓存 (修改点 #8) ----
 #define AGENT_CONTEXT_REUSE_HIT (1)    // Context 命中标记
 
+// ---- Context 文件依赖验证状态 ----
+#define AGENT_CONTEXT_VALID       (0)
+#define AGENT_CONTEXT_STALE       (1)
+#define AGENT_CONTEXT_NO_DEP      (2)
+#define AGENT_CONTEXT_NOT_FOUND   (3)
+#define AGENT_CONTEXT_DELETED     (4)
+
 // ---- 心跳时间轮 (修改点 #24) ----
 #define AGENT_HEARTBEAT_WHEEL_BUCKETS (64)  // 时间轮桶数
 #define AGENT_HEARTBEAT_WHEEL_MASK (63)
@@ -214,6 +221,15 @@ struct agent_context_node {
   int status;              // 修改点 #7: 节点状态
   char request[AGENT_CONTEXT_REQ_MAX];
   char result[AGENT_CONTEXT_RES_MAX];
+};
+
+struct agent_context_validation {
+  uint64 sequence;
+  uint dev;
+  uint inum;
+  uint64 recorded_version;
+  uint64 current_version;
+  int state;
 };
 
 // ---- Context Header (修改点 #7: 固定 ABI) ----
@@ -355,6 +371,7 @@ struct agent_trace_record {
 void agent_init_proc(struct proc *p);
 void agent_global_init(void);
 void agent_after_fork(struct proc *dst, struct proc *src);
+void agent_after_exec(struct proc *p);
 void agent_context_clear(struct proc *p);
 int agent_sync_header(struct proc *p);
 uint64 agent_mark_current(int type, int heartbeat_interval, uint64 resource_quota);
@@ -362,6 +379,7 @@ int agent_get_info(struct proc *p, struct agent_info *info);
 int agent_context_push_node(struct proc *p, struct agent_context_node *node);
 int agent_context_query(struct proc *p, uint64 dst, uint64 len);
 int agent_context_rollback(struct proc *p, uint64 keep_nodes);
+int agent_context_validate(struct proc *p, uint64 sequence, uint64 dst);
 int agent_copy_tool_list(struct proc *p, uint64 dst, uint64 len);
 int agent_tool_call(struct proc *p, struct agent_tool_request *req,
                     struct agent_tool_response *resp);
@@ -401,6 +419,9 @@ void agentfs_tool_del_file_attr(struct agent_tool_request *req,
 void agentfs_tool_query_file(struct proc *p, struct agent_tool_request *req,
                              struct agent_tool_response *resp);
 void agentfs_content_changed(void);
+uint64 agentfs_inode_version_get(uint dev, uint inum);
+uint64 agentfs_inode_version_bump(uint dev, uint inum);
+void agentfs_inode_version_remove(uint dev, uint inum);
 void agent_signal_filemod(void);
 void agent_signal_event_locked(struct proc *p, int event, uint64 now);
 int agent_schedule_score(struct proc *p, uint64 now);

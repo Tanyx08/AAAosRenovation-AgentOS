@@ -118,6 +118,131 @@ get_tool_list(char *buf, int size)
   return n;
 }
 
+static uint64
+last_context_sequence(struct agent_info *info)
+{
+  struct agent_context_header *hdr =
+    (struct agent_context_header *)info->context_start;
+
+  if(hdr->next_sequence <= 1)
+    return 0;
+  return hdr->next_sequence - 1;
+}
+
+static void
+context_version_test(struct agent_info *info)
+{
+  struct agent_context_validation validation;
+  struct agent_tool_response resp;
+  uint64 no_dep_seq;
+  uint64 read_seq;
+  uint64 refreshed_seq;
+  uint64 unrelated_seq;
+  uint64 deleted_seq;
+  uint64 rollback_seq;
+  uint64 clear_seq;
+  uint64 evicted_seq;
+  struct agent_context_header *hdr =
+    (struct agent_context_header *)info->context_start;
+  int fd;
+
+  check(call_tool("get_system_status", "", &resp) == AGENT_TOOL_OK,
+        "context no-dependency tool call");
+  no_dep_seq = last_context_sequence(info);
+  memset(&validation, 0, sizeof(validation));
+  check(context_validate(no_dep_seq, &validation) == 0 &&
+          validation.state == AGENT_CONTEXT_NO_DEP,
+        "context_validate reports NO_DEP");
+
+  make_file("ctxver", "version one");
+  check(call_tool("read_file", "path=ctxver", &resp) == AGENT_TOOL_OK,
+        "versioned read_file creates dependency");
+  read_seq = last_context_sequence(info);
+  memset(&validation, 0, sizeof(validation));
+  check(context_validate(read_seq, &validation) == 0 &&
+          validation.state == AGENT_CONTEXT_VALID &&
+          validation.recorded_version == validation.current_version,
+        "context_validate reports VALID");
+
+  fd = open("ctxver", O_RDWR);
+  check(fd >= 0 && write(fd, "changed", 7) == 7,
+        "modify versioned context file");
+  if(fd >= 0)
+    close(fd);
+  memset(&validation, 0, sizeof(validation));
+  check(context_validate(read_seq, &validation) == 0 &&
+          validation.state == AGENT_CONTEXT_STALE &&
+          validation.current_version != validation.recorded_version,
+        "context_validate reports STALE");
+
+  check(call_tool("read_file", "path=ctxver", &resp) == AGENT_TOOL_OK,
+        "read_file refreshes stale dependency");
+  refreshed_seq = last_context_sequence(info);
+  memset(&validation, 0, sizeof(validation));
+  check(context_validate(refreshed_seq, &validation) == 0 &&
+          validation.state == AGENT_CONTEXT_VALID &&
+          validation.recorded_version == validation.current_version,
+        "re-read context dependency returns VALID");
+
+  make_file("ctxother", "unrelated version");
+  check(call_tool("read_file", "path=ctxver", &resp) == AGENT_TOOL_OK,
+        "read dependency before unrelated modification");
+  unrelated_seq = last_context_sequence(info);
+  fd = open("ctxother", O_RDWR);
+  check(fd >= 0 && write(fd, "other", 5) == 5,
+        "modify unrelated context file");
+  if(fd >= 0)
+    close(fd);
+  memset(&validation, 0, sizeof(validation));
+  check(context_validate(unrelated_seq, &validation) == 0 &&
+          validation.state == AGENT_CONTEXT_VALID,
+        "unrelated modification keeps context VALID");
+
+  make_file("ctxgone", "delete me");
+  check(call_tool("read_file", "path=ctxgone", &resp) == AGENT_TOOL_OK,
+        "read_file dependency before unlink");
+  deleted_seq = last_context_sequence(info);
+  check(unlink("ctxgone") == 0, "unlink context dependency file");
+  memset(&validation, 0, sizeof(validation));
+  check(context_validate(deleted_seq, &validation) == 0 &&
+          validation.state == AGENT_CONTEXT_DELETED,
+        "context_validate reports DELETED");
+
+  memset(&validation, 0, sizeof(validation));
+  check(context_validate(0xffff, &validation) == 0 &&
+          validation.state == AGENT_CONTEXT_NOT_FOUND,
+        "context_validate reports NOT_FOUND");
+
+  check(call_tool("read_file", "path=ctxver", &resp) == AGENT_TOOL_OK,
+        "read dependency before rollback");
+  rollback_seq = last_context_sequence(info);
+  check(hdr->node_count > 1 && context_rollback(hdr->node_count - 1) == 0,
+        "rollback removes dependency node");
+  memset(&validation, 0, sizeof(validation));
+  check(context_validate(rollback_seq, &validation) == 0 &&
+          validation.state == AGENT_CONTEXT_NOT_FOUND,
+        "rolled-back dependency is NOT_FOUND");
+
+  check(call_tool("read_file", "path=ctxver", &resp) == AGENT_TOOL_OK,
+        "read dependency before clear");
+  clear_seq = last_context_sequence(info);
+  check(context_clear() == 0, "clear removes dependency nodes");
+  memset(&validation, 0, sizeof(validation));
+  check(context_validate(clear_seq, &validation) == 0 &&
+          validation.state == AGENT_CONTEXT_NOT_FOUND,
+        "cleared dependency is NOT_FOUND");
+
+  check(call_tool("read_file", "path=ctxver", &resp) == AGENT_TOOL_OK,
+        "read dependency before eviction");
+  evicted_seq = last_context_sequence(info);
+  for(int i = 0; i < AGENT_CONTEXT_MAX_NODES + 4; i++)
+    call_tool("get_system_status", "", &resp);
+  memset(&validation, 0, sizeof(validation));
+  check(context_validate(evicted_seq, &validation) == 0 &&
+          validation.state == AGENT_CONTEXT_NOT_FOUND,
+        "evicted dependency is NOT_FOUND");
+}
+
 static int
 send_message_to(int pid, const char *message)
 {
@@ -476,6 +601,7 @@ main(void)
           info.agent_group == getpid(),
         "agent priority and group initialized");
 
+  context_version_test(&info);
   shared_cache_test();
   shared_cache_invalidation_test();
   event_scheduler_test();
