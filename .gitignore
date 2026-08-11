@@ -126,3 +126,5 @@ guide/
 dual-results/
 baseline-xv6/mkfs/mkfs
 baseline-xv6/kernel/kernel
+
+docs/
