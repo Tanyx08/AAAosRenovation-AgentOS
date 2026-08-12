@@ -20,6 +20,16 @@
 提取码：qZx4 
 复制这段内容打开「百度网盘APP 即可获取」
 
+## 主要文档
+
+| 类别 | 文档 | 说明 |
+| --- | --- | --- |
+| 赛题要求 | [proj61赛题说明.md](proj61赛题说明.md) | 原始比赛题目和任务要求 |
+| 设计文档 | [设计文档.pdf](设计文档.pdf) | 设计文档 |
+| 项目PPT | [项目PPT.pptx](项目PPT.pptx) | 进展汇报幻灯片 |
+| 运行指南 | [AgentOS 接口与运行说明.md](AgentOS%20接口与运行说明.md) | 编译运行、系统调用接口、测试程序、CodeLab 和 LLM bridge 使用方式 |
+| 性能测试 | [AgentOS 性能测试说明.md](AgentOS%20性能测试说明.md) | AgentOS 性能测试点、运行方式和结果说明 |
+
 ## 功能总览
 
 ### 任务完成情况
@@ -222,15 +232,7 @@ python3 tools/llm_qemu_driver.py --mode api
 | Planner 输出最终 Summary | Context Path、文件摘要和工作流量化指标 | `user/planner_agent.c`、`kernel/workflow.c` |
 | `llm-demo/llm-api` | LLM Bridge、宿主机 Proxy 和串口协议 | `user/llm_bridge.c`、`tools/llm_qemu_driver.py` |
 
-## 主要文档
 
-| 类别 | 文档 | 说明 |
-| --- | --- | --- |
-| 赛题要求 | [proj61赛题说明.md](proj61赛题说明.md) | 原始比赛题目和任务要求 |
-| 设计文档 | [设计文档.docx](设计文档.docx) | 设计文档 |
-| 项目PPT | [项目PPT.pptx](项目PPT.pptx) | 进展汇报幻灯片 |
-| 运行指南 | [AgentOS 接口与运行说明.md](AgentOS%20接口与运行说明.md) | 编译运行、系统调用接口、测试程序、CodeLab 和 LLM bridge 使用方式 |
-| 性能测试 | [AgentOS 性能测试说明.md](AgentOS%20性能测试说明.md) | AgentOS 性能测试点、运行方式和结果说明 |
 
 ## xv6 基础说明
 
