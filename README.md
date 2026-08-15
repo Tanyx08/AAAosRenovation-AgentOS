@@ -15,10 +15,8 @@
 进展汇报幻灯片请看[项目PPT.pptx](项目PPT.pptx)
 
 演示视频链接：
-通过百度网盘分享的文件：AAAos翻新队...
-链接：https://pan.baidu.com/s/1xDvfA2AOVBsstNnwEhupEA 
-提取码：qZx4 
-复制这段内容打开「百度网盘APP 即可获取」
+通过网盘分享的文件：演示视频.mp4
+链接: https://pan.baidu.com/s/1yhLzQkdRFVZIDkPFC9-amw 提取码: xi5c
 
 ## 主要文档
 
